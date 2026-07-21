@@ -29,6 +29,11 @@ log = logging.getLogger("dreamteam.jobs")
 JOB_TTL_S = 900  # keep finished jobs for 15 min so a reload can still read them
 JOB_HEARTBEAT_S = 5  # how often a running job refreshes heartbeat_at
 JOB_STALE_S = 120  # heartbeat older than this on boot ⇒ orphaned by a restart
+# How long a job row is kept. The in-memory dict is GC'd after JOB_TTL_S, but
+# the DB row has no such bound and would otherwise grow for ever. Nothing reads
+# a job older than a few minutes — the artifact is the durable record, and it
+# is untouched by this — so 30 days is already generous.
+JOB_RETENTION_DAYS = 30
 
 # Weighted pipeline steps. `share` values sum to 100 and drive the progress bar
 # server-side, so the browser never has to guess where we are.
@@ -224,6 +229,28 @@ async def sweep_stale() -> int:
         return 0
     if n:
         log.info("marked %d orphaned job(s) stale on startup", n)
+    return int(n or 0)
+
+
+async def purge_old() -> int:
+    """Drop job rows past the retention window. Runs once at startup, next to
+    the stale sweep. Deletes only jobs — artifacts are the durable record and
+    are never touched here."""
+    from app.db import get_pool
+
+    try:
+        pool = await get_pool()
+        n = await pool.fetchval(
+            "WITH del AS (DELETE FROM jobs "
+            "WHERE created_at < now() - ($1 || ' days')::interval "
+            "RETURNING 1) SELECT count(*) FROM del",
+            str(JOB_RETENTION_DAYS),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("job retention purge failed: %s", e)
+        return 0
+    if n:
+        log.info("purged %d job row(s) older than %d days", n, JOB_RETENTION_DAYS)
     return int(n or 0)
 
 

@@ -47,6 +47,9 @@ async def lifespan(_app: FastAPI):
     # exists — this restart is precisely what orphaned it. Mark those stale so
     # their clients get "interrupted, please retry" instead of polling for ever.
     await jobs.sweep_stale()
+    # The in-memory dict is GC'd after 15 min but the rows are not, so trim the
+    # table on the way up. Artifacts are untouched.
+    await jobs.purge_old()
     yield
     await flags.stop()
     from app.db import close_pool
