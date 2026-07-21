@@ -11,10 +11,42 @@
     .top a { color: #888; }
     h1 { font-size: 1.6rem; margin-bottom: 18px; }
     form { display: flex; gap: 10px; }
-    input[type=url] { flex: 1; padding: 14px; border: 1px solid #ccc; border-radius: 8px; font-size: 1rem; }
+    input[type=url] { flex: 1; padding: 14px; border: 1px solid #ccc; border-radius: 8px; font-size: 1rem;
+                      background: #fff; transition: background .2s, color .2s; }
     button { background: #e63946; color: #fff; border: 0; border-radius: 8px; padding: 14px 24px;
-             font-size: 1rem; font-weight: 600; cursor: pointer; }
+             font-size: 1rem; font-weight: 600; cursor: pointer; transition: background .2s; }
+    /* Locked state while a build runs — nothing is clickable or typeable. */
+    input[type=url]:disabled { background: #e9e9ec; color: #9a9aa0; border-color: #ddd; cursor: not-allowed; }
+    button:disabled { background: #c9c9ce; color: #f2f2f4; cursor: not-allowed; }
+    form.busy { opacity: .85; pointer-events: none; }
     .hint { color: #777; font-size: .85rem; margin-top: 12px; }
+    .err { background: #fdecea; border: 1px solid #f5c6c2; color: #a3271d; padding: 14px;
+           border-radius: 8px; margin-top: 20px; font-size: .9rem; display: none; }
+
+    /* ---- progress panel ---- */
+    #panel { display: none; margin-top: 28px; background: #fff; border: 1px solid #e6e6ea;
+             border-radius: 12px; padding: 22px; }
+    .bar { height: 10px; background: #ececf0; border-radius: 99px; overflow: hidden; }
+    .bar > i { display: block; height: 100%; width: 0; border-radius: 99px; background: #e63946;
+               transition: width .45s cubic-bezier(.22,.61,.36,1); }
+    .bar.done > i { background: #2a9d5c; }
+    .meta { display: flex; justify-content: space-between; align-items: baseline;
+            margin-bottom: 10px; font-size: .92rem; }
+    .meta .pct { font-variant-numeric: tabular-nums; font-weight: 700; }
+    .meta .eta { color: #888; font-size: .82rem; font-variant-numeric: tabular-nums; }
+    #stepLabel { margin-top: 12px; font-size: .9rem; color: #444; }
+    #stepLabel .spin { display: inline-block; width: 9px; height: 9px; margin-right: 8px;
+                       border-radius: 99px; background: #e63946; animation: pulse 1s infinite ease-in-out; }
+    @keyframes pulse { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
+    #fields { list-style: none; padding: 0; margin: 18px 0 0; border-top: 1px solid #f0f0f3; }
+    #fields li { padding: 9px 0; border-bottom: 1px solid #f5f5f7; font-size: .87rem;
+                 display: flex; gap: 10px; animation: slide .3s ease-out; }
+    @keyframes slide { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+    #fields b { color: #2a9d5c; }
+    #fields .k { min-width: 150px; color: #555; font-weight: 600; }
+    #fields .v { color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #doneBox { display: none; margin-top: 18px; padding: 14px; border-radius: 8px;
+               background: #eaf7ef; border: 1px solid #bfe4cd; color: #1c6b3d; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -23,10 +55,180 @@
     <a href="/auth/google/logout">Sign out</a>
   </div>
   <h1>Paste your YouTube link</h1>
-  <form method="post" action="/artifact">
-    <input type="url" name="video_url" placeholder="https://www.youtube.com/watch?v=… or https://youtu.be/…" required>
-    <button type="submit">Create pack</button>
+  <form id="packForm" method="post" action="/artifact">
+    <input id="videoUrl" type="url" name="video_url"
+           placeholder="https://www.youtube.com/watch?v=… or https://youtu.be/…" required>
+    <button id="submitBtn" type="submit">Create pack</button>
   </form>
-  <p class="hint">Works with watch, youtu.be and Shorts links — unlisted or published. Free tier: 2 packs/day, 10/month.</p>
+  <p class="hint">Works with watch, youtu.be and Shorts links — unlisted or published. Free tier: 3 packs/day, 30/month.</p>
+  <div id="errBox" class="err"></div>
+
+  <div id="panel">
+    <div class="meta">
+      <span class="pct" id="pct">0%</span>
+      <span class="eta" id="eta">estimating…</span>
+    </div>
+    <div class="bar" id="bar"><i id="fill"></i></div>
+    <div id="stepLabel"><span class="spin"></span><span id="stepText">Starting…</span></div>
+    <ul id="fields"></ul>
+    <div id="doneBox">✅ Done — opening your Publishing Pack…</div>
+  </div>
+
+<script>
+(function () {
+  const form = document.getElementById('packForm');
+  const input = document.getElementById('videoUrl');
+  const btn = document.getElementById('submitBtn');
+  const panel = document.getElementById('panel');
+  const bar = document.getElementById('bar');
+  const fill = document.getElementById('fill');
+  const pct = document.getElementById('pct');
+  const etaEl = document.getElementById('eta');
+  const stepText = document.getElementById('stepText');
+  const fields = document.getElementById('fields');
+  const doneBox = document.getElementById('doneBox');
+  const errBox = document.getElementById('errBox');
+
+  let shownPct = 0;      // never let the bar move backwards
+  let etaDeadline = 0;   // wall-clock ms when we expect to finish
+  let ticker = null;
+
+  const LABELS = {
+    source_title: 'Video found', transcript: 'Transcript',
+    title: 'Optimized title', description_hook: 'Description hook',
+    tags: 'Tags', hashtags: 'Hashtags', pinned_comment: 'Pinned comment',
+    chapters: 'Chapters', thumbnail_prompts: 'Thumbnail prompts', srt_en: 'English SRT'
+  };
+
+  function lock(on) {
+    input.disabled = on;
+    btn.disabled = on;
+    form.classList.toggle('busy', on);
+    btn.textContent = on ? 'Working…' : 'Create pack';
+  }
+
+  function setPct(p) {
+    if (p <= shownPct) return;
+    shownPct = Math.min(100, p);
+    fill.style.width = shownPct + '%';
+    pct.textContent = shownPct + '%';
+  }
+
+  function startCountdown(ms) {
+    etaDeadline = Date.now() + ms;
+    clearInterval(ticker);
+    ticker = setInterval(function () {
+      const left = Math.max(0, Math.round((etaDeadline - Date.now()) / 1000));
+      etaEl.textContent = left > 0 ? ('about ' + left + 's remaining') : 'almost there…';
+      // Creep the bar forward between server events so it never looks frozen
+      // during the long single LLM call — capped so it cannot overtake reality.
+      const cap = Math.min(shownPct + 4, 96);
+      if (shownPct < cap && shownPct > 0) setPct(shownPct + 1);
+    }, 1000);
+  }
+
+  function addField(name, preview) {
+    if (document.getElementById('f-' + name)) return;
+    const li = document.createElement('li');
+    li.id = 'f-' + name;
+    let v = preview;
+    if (Array.isArray(v)) v = v.length + ' items · ' + v.slice(0, 3).join(', ');
+    else if (typeof v === 'object' && v !== null) v = JSON.stringify(v).slice(0, 80);
+    li.innerHTML = '<b>✓</b><span class="k"></span><span class="v"></span>';
+    li.querySelector('.k').textContent = LABELS[name] || name;
+    li.querySelector('.v').textContent = String(v == null ? '' : v).slice(0, 90);
+    fields.appendChild(li);
+  }
+
+  function fail(msg) {
+    clearInterval(ticker);
+    lock(false);
+    panel.style.display = 'none';
+    errBox.textContent = msg;
+    errBox.style.display = 'block';
+  }
+
+  function finish(artifactId) {
+    clearInterval(ticker);
+    setPct(100);
+    bar.classList.add('done');
+    etaEl.textContent = 'complete';
+    document.getElementById('stepLabel').style.display = 'none';
+    doneBox.style.display = 'block';
+    setTimeout(function () { window.location.href = '/artifact/' + artifactId; }, 900);
+  }
+
+  function follow(jobId) {
+    const es = new EventSource('/job/' + jobId + '/stream');
+    es.onmessage = function (ev) {
+      const d = JSON.parse(ev.data);
+      if (d.kind === 'progress') {
+        setPct(d.percent);
+        if (d.message) stepText.textContent = d.message;
+        if (d.eta_ms) etaDeadline = Date.now() + d.eta_ms;
+      } else if (d.kind === 'tick') {
+        if (d.eta_ms) etaDeadline = Date.now() + d.eta_ms;
+      } else if (d.kind === 'field') {
+        addField(d.name, d.preview);
+      } else if (d.kind === 'done') {
+        es.close();
+        finish(d.artifact_id);
+      } else if (d.kind === 'error') {
+        es.close();
+        fail(d.message || 'Something went wrong.');
+      }
+    };
+    // If SSE dies (proxy, sleep, flaky network), fall back to polling so the
+    // user is never left staring at a stalled bar.
+    es.onerror = function () {
+      es.close();
+      poll(jobId);
+    };
+  }
+
+  function poll(jobId) {
+    const iv = setInterval(function () {
+      fetch('/job/' + jobId, { credentials: 'same-origin' })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(function (d) {
+          setPct(d.percent);
+          if (d.message) stepText.textContent = d.message;
+          if (d.status === 'done') { clearInterval(iv); finish(d.artifact_id); }
+          if (d.status === 'error') { clearInterval(iv); fail(d.error || 'Something went wrong.'); }
+        })
+        .catch(function () { clearInterval(iv); fail('Lost connection to the build. Please try again.'); });
+    }, 2000);
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    errBox.style.display = 'none';
+    fields.innerHTML = '';
+    doneBox.style.display = 'none';
+    bar.classList.remove('done');
+    document.getElementById('stepLabel').style.display = '';
+    shownPct = 0; fill.style.width = '0'; pct.textContent = '0%';
+    lock(true);
+    panel.style.display = 'block';
+    stepText.textContent = 'Checking the YouTube link';
+    setPct(3);
+
+    fetch('/artifact', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ video_url: input.value })
+    })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (!res.ok) return fail(res.body.error || 'Request failed.');
+        if (res.body.artifact_id) return finish(res.body.artifact_id);  // cache hit
+        startCountdown(res.body.eta_ms || 75000);
+        follow(res.body.job_id);
+      })
+      .catch(function () { fail('Could not reach the server. Please try again.'); });
+  });
+})();
+</script>
 </body>
 </html>

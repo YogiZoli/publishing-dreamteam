@@ -40,9 +40,13 @@ class Settings(BaseSettings):
     crm_location_id: str = os.getenv("CRM_LOCATION_ID", "")
     crm_free_user_tag: str = os.getenv("CRM_FREE_USER_TAG", "dreamteam-free-user")
 
-    # Rate limits (free tier)
-    rate_limit_per_day: int = int(os.getenv("RATE_LIMIT_PER_DAY", "2"))
-    rate_limit_per_month: int = int(os.getenv("RATE_LIMIT_PER_MONTH", "10"))
+    # Rate limits (free tier). Raised 2026-07-21: measured cost is ~3.5k tokens
+    # per pack, so 30/month/user is still fractions of a cent — the old 2/10
+    # limit was throttling adoption for no real cost reason.
+    rate_limit_per_day: int = int(os.getenv("RATE_LIMIT_PER_DAY", "3"))
+    rate_limit_per_month: int = int(os.getenv("RATE_LIMIT_PER_MONTH", "30"))
+    # Comma-separated emails exempt from all quota checks (owner/testing).
+    unlimited_emails: str = os.getenv("UNLIMITED_EMAILS", "humorketing@gmail.com")
 
     class Config:
         env_file = ".env"

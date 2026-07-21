@@ -17,7 +17,21 @@ class RateStatus:
     reason: str = ""
 
 
-async def check(user_id: str, ip: str) -> RateStatus:
+def is_unlimited(email: str | None) -> bool:
+    """Owner / test accounts bypass quota entirely (UNLIMITED_EMAILS env)."""
+    if not email:
+        return False
+    allowed = {
+        e.strip().lower()
+        for e in get_settings().unlimited_emails.split(",")
+        if e.strip()
+    }
+    return email.strip().lower() in allowed
+
+
+async def check(user_id: str, ip: str, email: str | None = None) -> RateStatus:
+    if is_unlimited(email):
+        return RateStatus(True, "unlimited")
     s = get_settings()
     pool = await get_pool()
     async with pool.acquire() as conn:

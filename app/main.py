@@ -1,10 +1,13 @@
 """YT Publishing Dream Team — FastAPI entrypoint (free tier v1)."""
+import asyncio
+import json
 import logging
 import os
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -12,6 +15,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.auth import router as auth_router
 from app.config import FEATURE_FLAGS, flag, get_settings
 
+log = logging.getLogger("dreamteam")
 BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(title="YT Publishing Dream Team", docs_url=None, redoc_url=None)
@@ -60,47 +64,123 @@ async def app_home(request: Request):
 
 @app.post("/artifact")
 async def create_artifact(request: Request, video_url: str = Form(...)):
+    """Kick off a build and return immediately with a job id.
+
+    The pack takes ~30-90s (Gemini 3.x thinks before it answers), which is far
+    too long to hold a request open with no feedback. The browser now gets a
+    job id straight away and subscribes to /job/{id}/stream for live progress.
+    """
     user_id = request.session.get("user_id")
     if not user_id:
-        return RedirectResponse("/", status_code=303)
+        return JSONResponse({"error": "not_signed_in"}, status_code=401)
 
-    from app import engine, ratelimit
+    from app import engine, jobs, ratelimit
     from app.yt import extract_video_id
 
     video_id = extract_video_id(video_url)
     if not video_id:
-        raise HTTPException(400, "Not a valid YouTube URL")
+        return JSONResponse({"error": "That is not a valid YouTube URL."}, status_code=400)
 
-    # Cache hit does not consume quota
+    # Cache hit: no LLM call, no quota, no job — hand back the artifact at once.
     cached = await ratelimit.cached_artifact(video_id)
     if cached:
-        import json as _json
-
-        pack = _json.loads(cached["payload"])
+        pack = json.loads(cached["payload"])
         artifact_id = await engine.store_pack(user_id, video_id, pack)
-        return RedirectResponse(f"/artifact/{artifact_id}", status_code=303)
+        return JSONResponse({"artifact_id": artifact_id, "cached": True})
 
     ip = request.client.host if request.client else "unknown"
-    status = await ratelimit.check(user_id, ip)
+    email = request.session.get("email")
+    status = await ratelimit.check(user_id, ip, email)
     if not status.allowed:
-        raise HTTPException(429, f"Rate limit reached ({status.reason})")
+        return JSONResponse(
+            {"error": f"You have reached your free-tier limit ({status.reason})."},
+            status_code=429,
+        )
 
+    eta_ms = await engine.median_duration_ms()
+    job = jobs.create(user_id, video_id, eta_ms)
+    asyncio.create_task(_run_job(job, user_id, ip))
+    return JSONResponse({"job_id": job.id, "eta_ms": eta_ms})
+
+
+async def _run_job(job, user_id: str, ip: str) -> None:
+    """Background worker: builds the pack, streaming progress into the job."""
+    from app import engine, jobs, ratelimit
     from app.llm import LLMError
 
+    reporter = jobs.Reporter(job)
     try:
-        pack = await engine.build_pack(video_id)
-    except LLMError as e:
-        # Log the real cause — otherwise a 503 is invisible in the Railway logs.
-        logging.getLogger("dreamteam").error("LLMError on /artifact: %s", e)
-        return templates.TemplateResponse(
-            request=request,
-            name="error.html",
-            context={"message": "Our AI engine is temporarily unavailable. Please try again in a few minutes.", "detail": str(e)[:120]},
-            status_code=503,
+        pack = await engine.build_pack(job.video_id, report=reporter)
+        reporter.start("store")
+        await ratelimit.record(user_id, ip)
+        artifact_id = await engine.store_pack(user_id, job.video_id, pack)
+        reporter.done("store")
+        job.artifact_id = artifact_id
+        job.percent = 100
+        job.status = "done"
+        job.emit(
+            "done",
+            percent=100,
+            artifact_id=artifact_id,
+            message="Publishing pack ready",
+            usage=pack.get("usage", {}),
         )
-    await ratelimit.record(user_id, ip)
-    artifact_id = await engine.store_pack(user_id, video_id, pack)
-    return RedirectResponse(f"/artifact/{artifact_id}", status_code=303)
+    except LLMError as e:
+        log.error("LLMError on job %s (video %s): %s", job.id, job.video_id, e)
+        job.status = "error"
+        job.error = str(e)[:200]
+        job.emit(
+            "error",
+            message="Our AI engine is temporarily unavailable. Please try again in a few minutes.",
+            detail=str(e)[:160],
+        )
+    except Exception as e:  # noqa: BLE001 — must never leave the job hanging
+        log.exception("Job %s failed (video %s)", job.id, job.video_id)
+        job.status = "error"
+        job.error = str(e)[:200]
+        job.emit("error", message="Something went wrong building your pack.", detail=str(e)[:160])
+
+
+@app.get("/job/{job_id}")
+async def job_status(request: Request, job_id: str):
+    """Polling fallback for browsers/proxies where SSE does not survive."""
+    from app import jobs
+
+    user_id = request.session.get("user_id")
+    job = jobs.get(job_id, user_id) if user_id else None
+    if not job:
+        raise HTTPException(404, "Job not found or expired")
+    return {
+        "status": job.status,
+        "percent": job.percent,
+        "step": job.step,
+        "message": job.message,
+        "eta_ms": job.remaining_ms(),
+        "elapsed_ms": job.elapsed_ms(),
+        "artifact_id": job.artifact_id,
+        "error": job.error,
+    }
+
+
+@app.get("/job/{job_id}/stream")
+async def job_stream(request: Request, job_id: str):
+    """Server-Sent Events feed of progress + fields for one build."""
+    from app import jobs
+
+    user_id = request.session.get("user_id")
+    job = jobs.get(job_id, user_id) if user_id else None
+    if not job:
+        raise HTTPException(404, "Job not found or expired")
+    return StreamingResponse(
+        jobs.sse(job),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Railway's edge buffers by default; this forces immediate flush.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/artifact/{artifact_id}")

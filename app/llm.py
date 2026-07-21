@@ -1,9 +1,13 @@
 """LLM adapter — Gemini by default (GEMINI_API_KEY). Pure-LLM path also serves as
 the fallback when no keyword-research provider is available."""
 import json
+import logging
 import os
+import time
 
 import httpx
+
+log = logging.getLogger("dreamteam.llm")
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -31,6 +35,7 @@ async def generate_json_with_usage(
     # NOTE: gemini-2.0-flash has a free-tier quota of 0, and gemini-2.5-flash
     # was retired for new users (404). gemini-3.5-flash is the verified default.
     model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+    t0 = time.monotonic()
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
             GEMINI_URL.format(model=model),
@@ -47,12 +52,32 @@ async def generate_json_with_usage(
         raise LLMError(f"Gemini error {r.status_code}: {r.text[:200]}")
     body = r.json()
     um = body.get("usageMetadata") or {}
+    # thoughtsTokenCount is the reasoning Gemini 3.x does before it answers. It
+    # is NOT included in candidatesTokenCount but IS included in totalTokenCount
+    # and IS billed at the output rate — which is why prompt + output never adds
+    # up to total on a thinking model. Measured 2026-07-21: 497 + 1126 = 1623,
+    # total 3514, the missing 1891 being thoughts. Always account for it.
     usage = {
         "model": model,
         "prompt_tokens": um.get("promptTokenCount", 0),
         "output_tokens": um.get("candidatesTokenCount", 0),
+        "thoughts_tokens": um.get("thoughtsTokenCount", 0),
+        "cached_tokens": um.get("cachedContentTokenCount", 0),
         "total_tokens": um.get("totalTokenCount", 0),
+        "duration_ms": int((time.monotonic() - t0) * 1000),
     }
+    # Structured, greppable cost line — this is what shows up in `railway logs`.
+    log.info(
+        "gemini usage model=%s prompt=%d thoughts=%d output=%d cached=%d total=%d billable_out=%d duration_ms=%d",
+        model,
+        usage["prompt_tokens"],
+        usage["thoughts_tokens"],
+        usage["output_tokens"],
+        usage["cached_tokens"],
+        usage["total_tokens"],
+        usage["thoughts_tokens"] + usage["output_tokens"],
+        usage["duration_ms"],
+    )
     try:
         # Gemini 3.x thinking models can emit non-text parts (thoughtSignature
         # only) before the answer, so pick the first part that actually has text.
