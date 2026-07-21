@@ -42,7 +42,11 @@ async def build_pack(video_id: str, report=None) -> dict:
 
     report.start("transcript")
     segments = await yt.fetch_transcript(video_id)
-    transcript_text = " ".join(s["text"] for s in segments)[:24000]
+    # Timestamped, full-fidelity. The [m:ss] prefixes are what make the chapter
+    # times real instead of guessed — the model can only copy a time that is
+    # physically present in the prompt, and snap_chapters_to_segments then
+    # enforces that regardless of what it returns.
+    transcript_text = yt.format_transcript_for_prompt(segments)
     report.field(
         "transcript",
         f"{len(segments)} caption segments" if segments else "no transcript — chapters will be estimated",
@@ -70,6 +74,14 @@ async def build_pack(video_id: str, report=None) -> dict:
         on_retry=_on_retry,
     )
     calls.append({"step": "pack", **usage})
+
+    # Chapter times come from the caption data, never from the model. See
+    # yt.snap_chapters_to_segments — LLMs invent plausible timestamps even when
+    # the real ones are in front of them, and an off-by-8s chapter is visible
+    # to every viewer.
+    raw_chapters = pack.get("chapters") or []
+    pack["chapters"] = yt.snap_chapters_to_segments(raw_chapters, segments)
+    pack["chapters_estimated"] = not segments
     report.done("llm")
 
     # Push the finished pieces one by one so the preview fills in live rather
@@ -105,9 +117,25 @@ async def build_pack(video_id: str, report=None) -> dict:
             pack["localizations"] = {}
 
     report.start("srt")
-    pack["srt_en"] = yt.transcript_to_srt(segments) if segments else ""
-    pack["chapters_estimated"] = not segments
-    report.field("srt_en", f"{len(pack['srt_en'])} chars" if pack["srt_en"] else "not available")
+    # The timed segments are ALWAYS stored: chapters are built from them, and
+    # they are the raw material for paid-tier translation — text and timing
+    # kept separate so a translation only has to touch the text and can reuse
+    # the timing verbatim, 25 times over.
+    pack["transcript_segments"] = segments
+    pack["transcript_source"] = "youtube_captions" if segments else "none"
+
+    # Raw ASR SRT is deliberately NOT shipped on the free tier. The user's video
+    # already carries these same auto-captions, so handing back a copy adds
+    # nothing — and if they upload it, YouTube stops labelling it as automatic,
+    # so every misheard brand name becomes *their* published caption. Cleaned-up
+    # SRT is a paid feature (it needs a full-text LLM rewrite, billed at the
+    # output rate, which roughly doubles the cost of a pack).
+    pack["srt_en"] = yt.transcript_to_srt(segments) if (segments and flag("srt_output")) else ""
+    # Only announce the field when it actually ships. Otherwise the progress
+    # stream would advertise a "paid feature" that does not exist yet, and
+    # artifact.html already hides the card via {% if pack.srt_en %}.
+    if pack["srt_en"]:
+        report.field("srt_en", f"{len(pack['srt_en'])} chars")
     report.done("srt")
 
     prompt_t = sum(c.get("prompt_tokens", 0) for c in calls)

@@ -169,7 +169,10 @@ Rules:
 - hashtags: exactly 3, with # prefix.
 - pinned_comment: a specific engagement question about the video's core promise.
 - chapters: list of {{"time": "m:ss", "title": "..."}}. First MUST be 0:00 Introduction. 5-10 chapters,
-  min 10s apart, benefit-driven titles. If transcript has no timing info, estimate at 130 wpm.
+  min 10s apart, benefit-driven titles.
+  TIMESTAMP RULE: the transcript above is prefixed with real timestamps in [m:ss] form. You MUST copy
+  a timestamp VERBATIM from those brackets — pick the line where the topic actually changes. Never
+  compute, round, average or invent a time. If (and only if) the transcript is empty, estimate at 130 wpm.
 - thumbnail_prompts: exactly 3 distinct prompts for an image AI. EACH must include verbatim:
   "Use the attached profile photo as the main subject's face - preserve his exact likeness, do not
   alter facial features. The right side of the face faces forward and the right hand points to the left."

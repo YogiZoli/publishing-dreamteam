@@ -62,6 +62,11 @@ FEATURE_FLAGS: dict[str, bool] = {
     # localizations into Studio by hand, so running it on free tier only burns
     # tokens and clutters the artifact. Flip on when the paid tier ships.
     "localization": _env_flag("localization", False),
+    # Raw English SRT in the artifact. OFF: the video already has these exact
+    # auto-captions, so a copy adds no value, and uploading it would strip
+    # YouTube's "automatic" label off the ASR errors. Paid tier ships a
+    # CLEANED SRT instead (full-text LLM rewrite = output-rate tokens).
+    "srt_output": _env_flag("srt_output", False),
     "yt_write_path": _env_flag("yt_write_path", False),
 }
 

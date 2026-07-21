@@ -1,8 +1,11 @@
-"""YouTube helpers: video-id parsing, metadata (oEmbed), transcript (timedtext)."""
+"""YouTube helpers: video-id parsing, metadata (oEmbed), timed transcript."""
+import asyncio
+import logging
 import re
-import xml.etree.ElementTree as ET
 
 import httpx
+
+log = logging.getLogger("dreamteam.yt")
 
 _ID_PATTERNS = [
     r"(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})",
@@ -30,34 +33,128 @@ async def fetch_metadata(video_id: str) -> dict:
         return {"title": d.get("title", ""), "channel": d.get("author_name", "")}
 
 
-async def fetch_transcript(video_id: str) -> list[dict]:
-    """Best-effort captions via the public timedtext endpoint (EN).
+EN_LANGS = ("en", "en-US", "en-GB")
 
-    Returns [{start: float, dur: float, text: str}] or [] when unavailable.
+
+def _fetch_transcript_sync(video_id: str) -> list[dict]:
+    """Blocking fetch of YouTube's timed caption track (English only).
+
+    IMPORTANT — the timestamps here are MEASURED against the audio, not
+    estimated. Word accuracy of auto-generated captions is ~85-95% and it does
+    fumble brand names, but the timing is real, which is all the chapter
+    boundaries depend on. This is the whole reason chapters stopped being a
+    "130 wpm" guess.
+
+    English only, deliberately: translation is a paid-tier feature, and this
+    app never machine-translates on the free tier.
     """
-    async with httpx.AsyncClient(timeout=20) as client:
-        for lang in ("en", "en-US", "en-GB"):
-            r = await client.get(
-                "https://video.google.com/timedtext",
-                params={"lang": lang, "v": video_id},
-            )
-            if r.status_code == 200 and r.text.strip():
-                try:
-                    root = ET.fromstring(r.text)
-                except ET.ParseError:
-                    continue
-                out = []
-                for el in root.iter("text"):
-                    out.append(
-                        {
-                            "start": float(el.get("start", 0)),
-                            "dur": float(el.get("dur", 0)),
-                            "text": (el.text or "").replace("&#39;", "'").strip(),
-                        }
-                    )
-                if out:
-                    return out
-    return []
+    from youtube_transcript_api import YouTubeTranscriptApi
+
+    api = YouTubeTranscriptApi()
+    fetched = api.fetch(video_id, languages=list(EN_LANGS))
+    return [
+        {
+            "start": float(s.start),
+            "dur": float(s.duration),
+            "text": (s.text or "").replace("\n", " ").strip(),
+        }
+        for s in fetched
+        if (s.text or "").strip()
+    ]
+
+
+async def fetch_transcript(video_id: str) -> list[dict]:
+    """Returns [{start, dur, text}] or [] when captions are unavailable.
+
+    Never raises: a missing transcript must degrade to estimated chapters
+    rather than failing the whole pack. youtube-transcript-api is synchronous
+    and does network I/O, so it runs in a thread to keep the event loop free
+    for the SSE progress stream.
+    """
+    try:
+        segments = await asyncio.to_thread(_fetch_transcript_sync, video_id)
+        log.info("transcript video=%s segments=%d", video_id, len(segments))
+        return segments
+    except Exception as e:
+        # RequestBlocked / IpBlocked here means YouTube flagged the egress IP
+        # (a known risk on datacenter hosts like Railway). Logged explicitly so
+        # the cause is obvious in `railway logs` rather than looking like a
+        # video that simply has no captions.
+        log.warning(
+            "transcript unavailable video=%s: %s: %s",
+            video_id, type(e).__name__, str(e)[:200],
+        )
+        return []
+
+
+def format_transcript_for_prompt(segments: list[dict], limit: int = 60000) -> str:
+    """Full-fidelity timestamped transcript for the LLM.
+
+    Deliberately NOT downsampled or summarised: input tokens are cheap
+    ($1.50/1M) and a 5-minute video is only ~4k characters, so there is no
+    reason to trade away accuracy. Every line is prefixed with its real
+    timestamp so the model can only ever copy a timestamp that exists.
+    """
+    lines = [f"[{seconds_to_stamp(s['start'])}] {s['text']}" for s in segments]
+    return "\n".join(lines)[:limit]
+
+
+def seconds_to_stamp(sec: float) -> str:
+    total = int(sec)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02}:{s:02}" if h else f"{m}:{s:02}"
+
+
+def stamp_to_seconds(stamp: str) -> float | None:
+    parts = str(stamp).strip().split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    if len(nums) == 3:
+        return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    return None
+
+
+def snap_chapters_to_segments(
+    chapters: list[dict], segments: list[dict], min_gap: float = 10.0
+) -> list[dict]:
+    """Force every chapter time onto a timestamp that actually exists.
+
+    An LLM will happily invent a plausible-looking timestamp even when the real
+    ones are right there in the prompt, and a chapter that is 8 seconds off is
+    visible to every viewer. So the model's job is reduced to CHOOSING a
+    boundary and TITLING it; the actual second comes from the caption data.
+
+    Also enforces YouTube's own rules, which silently disable chapters if
+    broken: first chapter must be 0:00, ascending order, >=10s apart.
+    """
+    if not segments:
+        return chapters
+    starts = [s["start"] for s in segments]
+    out: list[dict] = []
+    for ch in chapters:
+        secs = stamp_to_seconds(ch.get("time", ""))
+        if secs is None:
+            continue
+        nearest = min(starts, key=lambda x: abs(x - secs))
+        out.append({"time": seconds_to_stamp(nearest), "title": str(ch.get("title", "")).strip(),
+                    "_sec": nearest})
+    out.sort(key=lambda c: c["_sec"])
+
+    deduped: list[dict] = []
+    for ch in out:
+        if deduped and ch["_sec"] - deduped[-1]["_sec"] < min_gap:
+            continue  # too close together — YouTube would reject the whole list
+        deduped.append(ch)
+
+    if deduped:
+        deduped[0]["_sec"] = 0.0
+        deduped[0]["time"] = "0:00"
+    return [{"time": c["time"], "title": c["title"]} for c in deduped]
 
 
 def transcript_to_srt(segments: list[dict]) -> str:
