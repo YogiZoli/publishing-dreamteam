@@ -15,6 +15,16 @@ class LLMError(Exception):
 
 
 async def generate_json(prompt: str, model: str | None = None) -> dict:
+    """Backwards-compatible wrapper: returns only the parsed JSON."""
+    data, _usage = await generate_json_with_usage(prompt, model)
+    return data
+
+
+async def generate_json_with_usage(
+    prompt: str, model: str | None = None
+) -> tuple[dict, dict]:
+    """Returns (parsed_json, usage). Usage carries Gemini's own token counts so
+    per-artifact cost can be measured; empty dict if the API omits them."""
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         raise LLMError("GEMINI_API_KEY not configured")
@@ -33,9 +43,17 @@ async def generate_json(prompt: str, model: str | None = None) -> dict:
         )
     if r.status_code != 200:
         raise LLMError(f"Gemini error {r.status_code}: {r.text[:200]}")
+    body = r.json()
+    um = body.get("usageMetadata") or {}
+    usage = {
+        "model": model,
+        "prompt_tokens": um.get("promptTokenCount", 0),
+        "output_tokens": um.get("candidatesTokenCount", 0),
+        "total_tokens": um.get("totalTokenCount", 0),
+    }
     try:
-        text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(text)
+        text = body["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(text), usage
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         raise LLMError(f"Bad LLM response: {e}")
 

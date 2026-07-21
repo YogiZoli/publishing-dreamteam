@@ -54,6 +54,10 @@ FEATURE_FLAGS: dict[str, bool] = {
     "paid_tier": _env_flag("paid_tier", False),
     "crm_connector": _env_flag("crm_connector", False),
     "byo_vidiq": _env_flag("byo_vidiq", False),
+    # 25-locale title/description block. Paid-tier feature: nobody pastes 25
+    # localizations into Studio by hand, so running it on free tier only burns
+    # tokens and clutters the artifact. Flip on when the paid tier ships.
+    "localization": _env_flag("localization", False),
     "yt_write_path": _env_flag("yt_write_path", False),
 }
 
