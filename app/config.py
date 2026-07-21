@@ -1,0 +1,70 @@
+"""App configuration and feature flags.
+
+Feature flags default per SPEC v2 Section 2. They can be overridden via
+environment variables (FLAG_<NAME>=true/false) and, later, via the
+feature_flags table in Supabase.
+"""
+import os
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    val = os.getenv(f"FLAG_{name.upper()}")
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+class Settings(BaseSettings):
+    app_name: str = "YT Publishing Dream Team"
+    base_url: str = os.getenv("BASE_URL", "https://dreamteam.commentclient.com")
+    environment: str = os.getenv("ENVIRONMENT", "development")
+
+    # Database (Supabase pooler; statement_cache_size=0 required — asyncpg + pgbouncer)
+    database_url: str = os.getenv("DATABASE_URL", "")
+    db_statement_cache_size: int = 0
+
+    # Redis (Upstash, dedicated free instance; all keys prefixed dt:)
+    redis_url: str = os.getenv("REDIS_URL", "")
+    redis_prefix: str = "dt:"
+
+    # Google Sign-In (dedicated GCP project; non-sensitive scopes only)
+    google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
+    google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+    # Fernet key for encrypting any stored tokens
+    fernet_key: str = os.getenv("FERNET_KEY", "")
+
+    # CRM adapter (server-side only; never exposed in public copy)
+    crm_provider: str = os.getenv("CRM_PROVIDER", "ghl")
+    crm_api_token: str = os.getenv("CRM_API_TOKEN", "")
+    crm_location_id: str = os.getenv("CRM_LOCATION_ID", "")
+    crm_free_user_tag: str = os.getenv("CRM_FREE_USER_TAG", "dreamteam-free-user")
+
+    # Rate limits (free tier)
+    rate_limit_per_day: int = int(os.getenv("RATE_LIMIT_PER_DAY", "2"))
+    rate_limit_per_month: int = int(os.getenv("RATE_LIMIT_PER_MONTH", "10"))
+
+    class Config:
+        env_file = ".env"
+        extra = "ignore"
+
+
+FEATURE_FLAGS: dict[str, bool] = {
+    "free_tier": _env_flag("free_tier", True),
+    "paid_tier": _env_flag("paid_tier", False),
+    "crm_connector": _env_flag("crm_connector", False),
+    "byo_vidiq": _env_flag("byo_vidiq", False),
+    "yt_write_path": _env_flag("yt_write_path", False),
+}
+
+
+def flag(name: str) -> bool:
+    return FEATURE_FLAGS.get(name, False)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
