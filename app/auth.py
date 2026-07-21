@@ -1,4 +1,5 @@
 """Google Sign-In (OpenID Connect) — non-sensitive scopes only: openid email profile."""
+import asyncio
 import secrets
 
 import httpx
@@ -80,6 +81,12 @@ async def callback(request: Request, code: str = "", state: str = "", error: str
             info["email"],
             info.get("name"),
         )
+
+    from app.crm import upsert_lead_safe
+
+    asyncio.get_event_loop().create_task(
+        upsert_lead_safe(info["email"], info.get("name", ""))
+    )
 
     request.session["user_id"] = str(user_id)
     request.session["email"] = info["email"]

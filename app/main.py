@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -54,4 +54,54 @@ async def app_home(request: Request):
             "email": request.session.get("email", ""),
             "name": request.session.get("name", ""),
         },
+    )
+
+
+@app.post("/artifact")
+async def create_artifact(request: Request, video_url: str = Form(...)):
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return RedirectResponse("/", status_code=303)
+
+    from app import engine, ratelimit
+    from app.yt import extract_video_id
+
+    video_id = extract_video_id(video_url)
+    if not video_id:
+        raise HTTPException(400, "Not a valid YouTube URL")
+
+    # Cache hit does not consume quota
+    cached = await ratelimit.cached_artifact(video_id)
+    if cached:
+        import json as _json
+
+        pack = _json.loads(cached["payload"])
+        artifact_id = await engine.store_pack(user_id, video_id, pack)
+        return RedirectResponse(f"/artifact/{artifact_id}", status_code=303)
+
+    ip = request.client.host if request.client else "unknown"
+    status = await ratelimit.check(user_id, ip)
+    if not status.allowed:
+        raise HTTPException(429, f"Rate limit reached ({status.reason})")
+
+    pack = await engine.build_pack(video_id)
+    await ratelimit.record(user_id, ip)
+    artifact_id = await engine.store_pack(user_id, video_id, pack)
+    return RedirectResponse(f"/artifact/{artifact_id}", status_code=303)
+
+
+@app.get("/artifact/{artifact_id}")
+async def view_artifact(request: Request, artifact_id: str):
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return RedirectResponse("/")
+    from app import engine
+
+    pack = await engine.get_pack(artifact_id, user_id)
+    if not pack:
+        raise HTTPException(404, "Artifact not found")
+    return templates.TemplateResponse(
+        request=request,
+        name="artifact.html",
+        context={"pack": pack, "paid_tier": flag("paid_tier")},
     )
