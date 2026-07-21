@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dream Team — Create your Publishing Pack</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #f7f7f8; color: #1d1d1f;
+           max-width: 720px; margin: 0 auto; padding: 60px 24px; }
+    .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px; font-size: .9rem; }
+    .top a { color: #888; }
+    h1 { font-size: 1.6rem; margin-bottom: 18px; }
+    form { display: flex; gap: 10px; }
+    input[type=url] { flex: 1; padding: 14px; border: 1px solid #ccc; border-radius: 8px; font-size: 1rem; }
+    button { background: #e63946; color: #fff; border: 0; border-radius: 8px; padding: 14px 24px;
+             font-size: 1rem; font-weight: 600; cursor: pointer; }
+    .hint { color: #777; font-size: .85rem; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <span>Signed in as {{ email }}</span>
+    <a href="/auth/google/logout">Sign out</a>
+  </div>
+  <h1>Paste your YouTube link</h1>
+  <form method="post" action="/artifact">
+    <input type="url" name="video_url" placeholder="https://www.youtube.com/watch?v=… or https://youtu.be/…" required>
+    <button type="submit">Create pack</button>
+  </form>
+  <p class="hint">Works with watch, youtu.be and Shorts links — unlisted or published. Free tier: 2 packs/day, 10/month.</p>
+</body>
+</html>
