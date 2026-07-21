@@ -1,4 +1,5 @@
 """YT Publishing Dream Team — FastAPI entrypoint (free tier v1)."""
+import logging
 import os
 from pathlib import Path
 
@@ -89,6 +90,8 @@ async def create_artifact(request: Request, video_url: str = Form(...)):
     try:
         pack = await engine.build_pack(video_id)
     except LLMError as e:
+        # Log the real cause — otherwise a 503 is invisible in the Railway logs.
+        logging.getLogger("dreamteam").error("LLMError on /artifact: %s", e)
         return templates.TemplateResponse(
             request=request,
             name="error.html",

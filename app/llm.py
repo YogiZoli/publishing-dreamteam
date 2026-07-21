@@ -28,7 +28,9 @@ async def generate_json_with_usage(
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         raise LLMError("GEMINI_API_KEY not configured")
-    model = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    # NOTE: gemini-2.0-flash has a free-tier quota of 0, and gemini-2.5-flash
+    # was retired for new users (404). gemini-3.5-flash is the verified default.
+    model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
             GEMINI_URL.format(model=model),
@@ -52,9 +54,12 @@ async def generate_json_with_usage(
         "total_tokens": um.get("totalTokenCount", 0),
     }
     try:
-        text = body["candidates"][0]["content"]["parts"][0]["text"]
+        # Gemini 3.x thinking models can emit non-text parts (thoughtSignature
+        # only) before the answer, so pick the first part that actually has text.
+        parts = body["candidates"][0]["content"]["parts"]
+        text = next(p["text"] for p in parts if p.get("text"))
         return json.loads(text), usage
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
+    except (KeyError, IndexError, StopIteration, json.JSONDecodeError) as e:
         raise LLMError(f"Bad LLM response: {e}")
 
 
