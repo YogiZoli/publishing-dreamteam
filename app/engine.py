@@ -28,6 +28,7 @@ class _NullReporter:
     def start(self, key): pass
     def done(self, key): pass
     def field(self, name, preview): pass
+    def note(self, message, extra_ms=0): pass
 
 
 async def build_pack(video_id: str, report=None) -> dict:
@@ -51,12 +52,22 @@ async def build_pack(video_id: str, report=None) -> dict:
     calls: list[dict] = []
 
     report.start("llm")
+
+    def _on_retry(attempt, delay, status, model_name):
+        # Gemini capacity spikes (503) are routine. Tell the user we are still
+        # working and extend the ETA, rather than letting the bar look stuck.
+        report.note(
+            f"AI engine busy — retrying in {int(delay)}s (attempt {attempt + 1})",
+            extra_ms=int(delay * 1000) + 5000,
+        )
+
     pack, usage = await llm.generate_json_with_usage(
         llm.PACK_PROMPT.format(
             title=meta.get("title", "(unknown)"),
             channel=meta.get("channel", "(unknown)"),
             transcript=transcript_text or "(no transcript available)",
-        )
+        ),
+        on_retry=_on_retry,
     )
     calls.append({"step": "pack", **usage})
     report.done("llm")

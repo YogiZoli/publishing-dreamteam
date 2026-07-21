@@ -1,8 +1,10 @@
 """LLM adapter — Gemini by default (GEMINI_API_KEY). Pure-LLM path also serves as
 the fallback when no keyword-research provider is available."""
+import asyncio
 import json
 import logging
 import os
+import random
 import time
 
 import httpx
@@ -12,6 +14,15 @@ log = logging.getLogger("dreamteam.llm")
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
+
+# Transient conditions worth retrying. 503 UNAVAILABLE ("model is currently
+# experiencing high demand") hit production on 2026-07-21 and killed the whole
+# build on the first try — Gemini capacity spikes are normal and short-lived.
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 4
+# If the pinned model stays unavailable, fall through to a second model rather
+# than failing the user. Probed available on this key: gemini-flash-latest.
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-flash-latest")
 
 
 class LLMError(Exception):
@@ -24,8 +35,61 @@ async def generate_json(prompt: str, model: str | None = None) -> dict:
     return data
 
 
+async def _post_with_retry(api_key: str, model: str, prompt: str, on_retry=None):
+    """POST to Gemini, retrying transient failures, then falling back to a
+    second model. Returns (response_body, model_actually_used).
+
+    `on_retry(attempt, delay_s, status, model)` lets the caller surface "retrying
+    in Ns" in the UI instead of leaving the progress bar looking frozen.
+    """
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7},
+    }
+    candidates = [model] + ([FALLBACK_MODEL] if FALLBACK_MODEL and FALLBACK_MODEL != model else [])
+    last_err = "no attempt made"
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        for m_idx, m in enumerate(candidates):
+            # Give the pinned model the full retry budget; the fallback gets a
+            # shorter one so a total outage still fails in reasonable time.
+            attempts = MAX_ATTEMPTS if m_idx == 0 else 2
+            for attempt in range(1, attempts + 1):
+                status = 0
+                try:
+                    r = await client.post(
+                        GEMINI_URL.format(model=m), params={"key": api_key}, json=payload
+                    )
+                    status = r.status_code
+                    if status == 200:
+                        if m != model:
+                            log.warning("gemini fell back to %s after %s failed", m, model)
+                        return r.json(), m
+                    last_err = f"Gemini error {status}: {r.text[:200]}"
+                except httpx.RequestError as e:
+                    last_err = f"Gemini network error: {e}"
+
+                # Non-retryable (400 bad request, 404 retired model, 403 bad key)
+                # — no point burning the budget, move to the next model.
+                if status and status not in RETRY_STATUSES:
+                    log.error("gemini non-retryable on %s: %s", m, last_err)
+                    break
+                if attempt == attempts:
+                    break
+                delay = min(2 ** (attempt - 1) * 2, 16) + random.uniform(0, 1.5)
+                log.warning(
+                    "gemini %s attempt %d/%d failed (status=%s), retrying in %.1fs: %s",
+                    m, attempt, attempts, status, delay, last_err[:120],
+                )
+                if on_retry:
+                    on_retry(attempt, delay, status, m)
+                await asyncio.sleep(delay)
+
+    raise LLMError(f"{last_err} (all retries and fallbacks exhausted)")
+
+
 async def generate_json_with_usage(
-    prompt: str, model: str | None = None
+    prompt: str, model: str | None = None, on_retry=None
 ) -> tuple[dict, dict]:
     """Returns (parsed_json, usage). Usage carries Gemini's own token counts so
     per-artifact cost can be measured; empty dict if the API omits them."""
@@ -36,21 +100,7 @@ async def generate_json_with_usage(
     # was retired for new users (404). gemini-3.5-flash is the verified default.
     model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
     t0 = time.monotonic()
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(
-            GEMINI_URL.format(model=model),
-            params={"key": api_key},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "temperature": 0.7,
-                },
-            },
-        )
-    if r.status_code != 200:
-        raise LLMError(f"Gemini error {r.status_code}: {r.text[:200]}")
-    body = r.json()
+    body, model = await _post_with_retry(api_key, model, prompt, on_retry)
     um = body.get("usageMetadata") or {}
     # thoughtsTokenCount is the reasoning Gemini 3.x does before it answers. It
     # is NOT included in candidatesTokenCount but IS included in totalTokenCount

@@ -129,11 +129,24 @@ async def _run_job(job, user_id: str, ip: str) -> None:
         log.error("LLMError on job %s (video %s): %s", job.id, job.video_id, e)
         job.status = "error"
         job.error = str(e)[:200]
-        job.emit(
-            "error",
-            message="Our AI engine is temporarily unavailable. Please try again in a few minutes.",
-            detail=str(e)[:160],
-        )
+        # Be explicit about whose fault it is. These are Google-side conditions,
+        # not a bug in this app, and the user's quota is untouched because
+        # ratelimit.record() only runs after a successful build.
+        text = str(e)
+        if "429" in text or "quota" in text.lower() or "RESOURCE_EXHAUSTED" in text:
+            msg = ("Google's Gemini API has hit its rate limit on our side — this is a "
+                   "limit on Google's end, not a problem with your link or your account. "
+                   "We retried automatically 4 times. Please try again in a few minutes. "
+                   "Your quota was not used.")
+        elif "503" in text or "UNAVAILABLE" in text or "500" in text or "502" in text:
+            msg = ("Google's Gemini API is overloaded right now — the problem is on "
+                   "Google's side, not with your video or your account. We already "
+                   "retried 4 times and tried a backup model. Please try again in a "
+                   "minute. Your quota was not used.")
+        else:
+            msg = ("We could not reach the AI engine. Please try again in a few "
+                   "minutes — your quota was not used.")
+        job.emit("error", message=msg, detail=text[:160])
     except Exception as e:  # noqa: BLE001 — must never leave the job hanging
         log.exception("Job %s failed (video %s)", job.id, job.video_id)
         job.status = "error"

@@ -136,6 +136,20 @@ class Reporter:
     def field(self, name: str, preview) -> None:
         self.job.emit("field", name=name, preview=preview)
 
+    def note(self, message: str, extra_ms: int = 0) -> None:
+        """Status text change without advancing the bar — used for retries, so
+        the user sees *why* it is taking longer instead of a frozen bar."""
+        self.job.message = message
+        if extra_ms:
+            self.job.eta_ms += extra_ms
+        self.job.emit(
+            "progress",
+            percent=self.job.percent,
+            step=self.job.step,
+            message=message,
+            eta_ms=self.job.remaining_ms(),
+        )
+
 
 async def sse(job: Job):
     """Server-Sent Events generator: replays the event log, then follows live.
