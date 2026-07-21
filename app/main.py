@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -15,8 +16,20 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.auth import router as auth_router
 from app.config import FEATURE_FLAGS, flag, get_settings
 
-log = logging.getLogger("dreamteam")
 BASE_DIR = Path(__file__).resolve().parent
+
+# Uvicorn configures its own loggers but leaves the root logger at WARNING, so
+# our logging.info() calls were silently dropped in production — the whole
+# 'gemini usage' token line was invisible in `railway logs` while warnings and
+# errors came through fine. Configure our own logger explicitly.
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s] %(message)s"))
+_root = logging.getLogger("dreamteam")
+_root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+_root.addHandler(_handler)
+_root.propagate = False  # avoid double-printing through uvicorn's root handler
+
+log = logging.getLogger("dreamteam")
 
 app = FastAPI(title="YT Publishing Dream Team", docs_url=None, redoc_url=None)
 app.add_middleware(
