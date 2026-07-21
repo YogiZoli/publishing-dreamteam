@@ -84,7 +84,17 @@ async def create_artifact(request: Request, video_url: str = Form(...)):
     if not status.allowed:
         raise HTTPException(429, f"Rate limit reached ({status.reason})")
 
-    pack = await engine.build_pack(video_id)
+    from app.llm import LLMError
+
+    try:
+        pack = await engine.build_pack(video_id)
+    except LLMError as e:
+        return templates.TemplateResponse(
+            request=request,
+            name="error.html",
+            context={"message": "Our AI engine is temporarily unavailable. Please try again in a few minutes.", "detail": str(e)[:120]},
+            status_code=503,
+        )
     await ratelimit.record(user_id, ip)
     artifact_id = await engine.store_pack(user_id, video_id, pack)
     return RedirectResponse(f"/artifact/{artifact_id}", status_code=303)
