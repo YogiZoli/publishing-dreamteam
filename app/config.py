@@ -22,13 +22,10 @@ class Settings(BaseSettings):
     base_url: str = os.getenv("BASE_URL", "https://dreamteam.commentclient.com")
     environment: str = os.getenv("ENVIRONMENT", "development")
 
-    # Database (Supabase pooler; statement_cache_size=0 required — asyncpg + pgbouncer)
+    # Database (Neon Postgres, pooled connection; statement_cache_size=0 — asyncpg + pgbouncer)
     database_url: str = os.getenv("DATABASE_URL", "")
     db_statement_cache_size: int = 0
-
-    # Redis (Upstash, dedicated free instance; all keys prefixed dt:)
-    redis_url: str = os.getenv("REDIS_URL", "")
-    redis_prefix: str = "dt:"
+    # No Redis: rate limiting + artifact cache live in Postgres (rate_limits, artifacts).
 
     # Google Sign-In (dedicated GCP project; non-sensitive scopes only)
     google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")

@@ -5,7 +5,7 @@ Standalone web app: paste one YouTube URL, get a complete Publishing Artifact
 chapters, EN captions + 25-language localization) with per-field copy buttons.
 
 - Free tier: Google Sign-In, 2 artifacts/day, 10/month.
-- Stack: FastAPI - Railway - Supabase (pooler, statement_cache_size=0) - Upstash Redis.
+- Stack: FastAPI - Railway - Neon Postgres (pooled, statement_cache_size=0; rate limiting + cache in Postgres, no Redis).
 - Branches: dev (work) / main (prod, ff-merge only).
 - Domain: dreamteam.commentclient.com
 
