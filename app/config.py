@@ -40,9 +40,18 @@ class Settings(BaseSettings):
     crm_location_id: str = os.getenv("CRM_LOCATION_ID", "")
     crm_free_user_tag: str = os.getenv("CRM_FREE_USER_TAG", "dreamteam-free-user")
 
-    # Rate limits (free tier). Raised 2026-07-21: measured cost is ~3.5k tokens
-    # per pack, so 30/month/user is still fractions of a cent — the old 2/10
-    # limit was throttling adoption for no real cost reason.
+    # Rate limits (free tier). Raised 2026-07-21 from the old 2/day + 10/month.
+    #
+    # COST REALITY (comment corrected 2026-07-22 — the previous version was
+    # wrong and would have misled the next cost decision). A pack is ~3.5k
+    # tokens, but ~60% of those are THINKING tokens, which bill at the OUTPUT
+    # rate. Measured cost is ~$0.03/pack, so 30/month/user is ~$0.90/user/month
+    # — roughly 100x the "fractions of a cent" this comment used to claim.
+    #
+    # The 3/30 limit still stands (confirmed by Zoltan 2026-07-22): free users
+    # do not max it out, and the headroom matters for demos and seminars.
+    # Billing is not connected, so actual spend today is $0. Revisit before any
+    # growth push — see the cost-ceiling item in the handover doc.
     rate_limit_per_day: int = int(os.getenv("RATE_LIMIT_PER_DAY", "3"))
     rate_limit_per_month: int = int(os.getenv("RATE_LIMIT_PER_MONTH", "30"))
     # Comma-separated emails exempt from all quota checks (owner/testing).
