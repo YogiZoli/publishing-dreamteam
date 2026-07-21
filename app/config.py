@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # Comma-separated emails exempt from all quota checks (owner/testing).
     unlimited_emails: str = os.getenv("UNLIMITED_EMAILS", "humorketing@gmail.com")
 
+    # Bearer token for /admin/flags. If empty, the admin endpoints refuse every
+    # request — an unset token must never mean "open", it means "closed".
+    admin_token: str = os.getenv("ADMIN_TOKEN", "")
+    # How long a DB-sourced flag snapshot is trusted before the background
+    # refresher replaces it. Writes through /admin/flags refresh immediately,
+    # so this only bounds how long an out-of-band DB edit takes to appear.
+    flag_refresh_s: int = int(os.getenv("FLAG_REFRESH_S", "30"))
+
     class Config:
         env_file = ".env"
         extra = "ignore"
@@ -80,7 +88,28 @@ FEATURE_FLAGS: dict[str, bool] = {
 }
 
 
+# Where each flag's current value came from: "db", "env" or "default".
+# app/flags.py rewrites FEATURE_FLAGS and this map when it refreshes from the
+# feature_flags table. Kept here (not in flags.py) so that flag() stays a plain
+# dict read and every existing call site works unchanged.
+FLAG_SOURCES: dict[str, str] = {
+    name: ("env" if os.getenv(f"FLAG_{name.upper()}") is not None else "default")
+    for name in FEATURE_FLAGS
+}
+
+# Snapshot of the env/default resolution, captured before any DB refresh. When
+# a row is deleted from feature_flags the flag must fall back to exactly this,
+# not to whatever the DB last said.
+ENV_FLAGS: dict[str, bool] = dict(FEATURE_FLAGS)
+
+
 def flag(name: str) -> bool:
+    """Effective value of a feature flag.
+
+    Deliberately synchronous and free of I/O: app/flags.py keeps FEATURE_FLAGS
+    warm in the background, so a request never waits on Postgres to find out
+    whether a feature is on.
+    """
     return FEATURE_FLAGS.get(name, False)
 
 

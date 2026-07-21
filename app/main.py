@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.admin import router as admin_router
 from app.auth import router as auth_router
 from app.config import FEATURE_FLAGS, flag, get_settings
 
@@ -31,7 +33,26 @@ _root.propagate = False  # avoid double-printing through uvicorn's root handler
 
 log = logging.getLogger("dreamteam")
 
-app = FastAPI(title="YT Publishing Dream Team", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Load feature flags from the DB before serving, then keep them warm.
+
+    flags.start() never raises: if Neon is unreachable at boot the app still
+    comes up on env/default values rather than refusing to start.
+    """
+    from app import flags
+
+    await flags.start()
+    yield
+    await flags.stop()
+    from app.db import close_pool
+
+    await close_pool()
+
+
+app = FastAPI(
+    title="YT Publishing Dream Team", docs_url=None, redoc_url=None, lifespan=lifespan
+)
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SESSION_SECRET", "dev-only-change-me"),
@@ -40,10 +61,13 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")
 async def health():
+    # FEATURE_FLAGS is the live effective snapshot — app/flags.py rewrites it in
+    # place from the feature_flags table, so this reflects DB overrides too.
     return {"status": "ok", "flags": FEATURE_FLAGS}
 
 
