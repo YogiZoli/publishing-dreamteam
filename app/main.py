@@ -40,9 +40,13 @@ async def lifespan(_app: FastAPI):
     flags.start() never raises: if Neon is unreachable at boot the app still
     comes up on env/default values rather than refusing to start.
     """
-    from app import flags
+    from app import flags, jobs
 
     await flags.start()
+    # Any job still 'running' in the DB belongs to a process that no longer
+    # exists — this restart is precisely what orphaned it. Mark those stale so
+    # their clients get "interrupted, please retry" instead of polling for ever.
+    await jobs.sweep_stale()
     yield
     await flags.stop()
     from app.db import close_pool
@@ -135,7 +139,7 @@ async def create_artifact(request: Request, video_url: str = Form(...)):
         )
 
     eta_ms = await engine.median_duration_ms()
-    job = jobs.create(user_id, video_id, eta_ms)
+    job = await jobs.create(user_id, video_id, eta_ms)
     asyncio.create_task(_run_job(job, user_id, ip))
     return JSONResponse({"job_id": job.id, "eta_ms": eta_ms})
 
@@ -189,6 +193,10 @@ async def _run_job(job, user_id: str, ip: str) -> None:
         job.status = "error"
         job.error = str(e)[:200]
         job.emit("error", message="Something went wrong building your pack.", detail=str(e)[:160])
+    finally:
+        # Terminal state to Postgres, heartbeat stopped. In `finally` so an
+        # unexpected failure path can never leave a row stuck on 'running'.
+        await jobs.finish(job)
 
 
 @app.get("/job/{job_id}")
@@ -197,8 +205,15 @@ async def job_status(request: Request, job_id: str):
     from app import jobs
 
     user_id = request.session.get("user_id")
-    job = jobs.get(job_id, user_id) if user_id else None
+    if not user_id:
+        raise HTTPException(404, "Job not found or expired")
+    job = jobs.get(job_id, user_id)
     if not job:
+        # Not in this process's memory: either a redeploy happened or the 15min
+        # in-memory TTL expired. The DB still knows the outcome.
+        stored = await jobs.load(job_id, user_id)
+        if stored:
+            return stored
         raise HTTPException(404, "Job not found or expired")
     return {
         "status": job.status,
@@ -218,9 +233,21 @@ async def job_stream(request: Request, job_id: str):
     from app import jobs
 
     user_id = request.session.get("user_id")
-    job = jobs.get(job_id, user_id) if user_id else None
-    if not job:
+    if not user_id:
         raise HTTPException(404, "Job not found or expired")
+    job = jobs.get(job_id, user_id)
+    if not job:
+        # Survivor path: the live event log died with the old process, but the
+        # outcome is in Postgres. Emit that single terminal event and close, so
+        # a reconnecting browser resolves instead of falling into a poll loop.
+        stored = await jobs.load(job_id, user_id)
+        if not stored:
+            raise HTTPException(404, "Job not found or expired")
+        return StreamingResponse(
+            jobs.sse_replay(stored),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     return StreamingResponse(
         jobs.sse(job),
         media_type="text/event-stream",

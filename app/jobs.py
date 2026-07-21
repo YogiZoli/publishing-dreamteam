@@ -1,17 +1,34 @@
-"""In-memory job registry for long-running pack builds.
+"""Job registry for long-running pack builds: memory for the live stream,
+Postgres for durability.
 
 One Railway container running one uvicorn worker, so a process-local dict is
-enough — no Redis, consistent with the rest of the stack. A job is lost on
-redeploy; the client then gets 404 from /job/{id} and shows a retry prompt.
+still the right place for the live SSE event log — no Redis, consistent with
+the rest of the stack. What the dict cannot do is survive a redeploy, and that
+used to mean the client got a bare 404 and showed "Lost connection" with no way
+to tell a finished build from a dead one.
 
-Jobs are garbage-collected after JOB_TTL_S so the dict cannot grow unbounded.
+So the compact state (status, percent, step, message, artifact_id, error) is
+mirrored into the `jobs` table. To be clear about what this does and does not
+buy: **a build does not resume after a restart** — the worker process really is
+gone. What survives is the OUTCOME. A job that finished before the redeploy
+still redirects to its artifact; one that was interrupted is reported as
+interrupted, with a retry prompt, instead of vanishing.
+
+Write volume is deliberately low: one row on create, one every
+JOB_HEARTBEAT_S while running, one on the terminal state. Live progress comes
+from the in-memory event log over SSE, so the DB never sits in the hot path.
 """
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 
+log = logging.getLogger("dreamteam.jobs")
+
 JOB_TTL_S = 900  # keep finished jobs for 15 min so a reload can still read them
+JOB_HEARTBEAT_S = 5  # how often a running job refreshes heartbeat_at
+JOB_STALE_S = 120  # heartbeat older than this on boot ⇒ orphaned by a restart
 
 # Weighted pipeline steps. `share` values sum to 100 and drive the progress bar
 # server-side, so the browser never has to guess where we are.
@@ -58,6 +75,7 @@ class Job:
     # that connects late (or reconnects) still sees the whole history.
     events: list[dict] = field(default_factory=list)
     _bell: asyncio.Event = field(default_factory=asyncio.Event)
+    _hb: asyncio.Task | None = None
 
     def emit(self, kind: str, **payload) -> None:
         self.events.append({"kind": kind, **payload})
@@ -73,11 +91,13 @@ class Job:
 _JOBS: dict[str, Job] = {}
 
 
-def create(user_id: str, video_id: str, eta_ms: int) -> Job:
+async def create(user_id: str, video_id: str, eta_ms: int) -> Job:
     _gc()
-    job = Job(id=uuid.uuid4().hex, user_id=user_id, video_id=video_id, eta_ms=eta_ms)
+    job = Job(id=str(uuid.uuid4()), user_id=user_id, video_id=video_id, eta_ms=eta_ms)
     _JOBS[job.id] = job
     job.emit("progress", percent=0, step="queued", message="Starting…", eta_ms=eta_ms)
+    await persist(job)
+    job._hb = asyncio.create_task(_heartbeat(job))
     return job
 
 
@@ -86,6 +106,125 @@ def get(job_id: str, user_id: str) -> Job | None:
     if job and job.user_id == user_id:
         return job
     return None
+
+
+# ---------------------------------------------------------------- durability
+
+
+async def persist(job: Job) -> None:
+    """Upsert the job's compact state. Never raises: losing a status write must
+    not break a build that is otherwise working."""
+    from app.db import get_pool
+
+    try:
+        pool = await get_pool()
+        await pool.execute(
+            """
+            INSERT INTO jobs (id, user_id, video_id, status, percent, step, message,
+                              eta_ms, artifact_id, error, updated_at, heartbeat_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                    NULLIF($9, '')::uuid, $10, now(), now())
+            ON CONFLICT (id) DO UPDATE SET
+                status = EXCLUDED.status, percent = EXCLUDED.percent,
+                step = EXCLUDED.step, message = EXCLUDED.message,
+                eta_ms = EXCLUDED.eta_ms, artifact_id = EXCLUDED.artifact_id,
+                error = EXCLUDED.error, updated_at = now(), heartbeat_at = now()
+            """,
+            job.id, job.user_id, job.video_id, job.status, job.percent, job.step,
+            job.message, job.remaining_ms(), job.artifact_id, job.error,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("job persist failed id=%s: %s", job.id, e)
+
+
+async def _heartbeat(job: Job) -> None:
+    try:
+        while job.status == "running":
+            await asyncio.sleep(JOB_HEARTBEAT_S)
+            if job.status != "running":
+                break
+            await persist(job)
+    except asyncio.CancelledError:
+        pass
+
+
+async def finish(job: Job) -> None:
+    """Stop the heartbeat and write the terminal state exactly once."""
+    if job._hb is not None:
+        job._hb.cancel()
+        job._hb = None
+    await persist(job)
+
+
+async def load(job_id: str, user_id: str) -> dict | None:
+    """Read a job's state from the DB — used when it is not in memory, i.e.
+    after a redeploy. A 'stale' row is presented to the client as an error so
+    the existing retry UI handles it with no template change."""
+    from app.db import get_pool
+
+    try:
+        uuid.UUID(job_id)  # reject anything that is not a uuid before hitting PG
+    except ValueError:
+        return None
+    try:
+        pool = await get_pool()
+        row = await pool.fetchrow(
+            "SELECT status, percent, step, message, eta_ms, artifact_id, error, "
+            "heartbeat_at FROM jobs WHERE id = $1::uuid AND user_id = $2::uuid",
+            job_id, user_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("job load failed id=%s: %s", job_id, e)
+        return None
+    if row is None:
+        return None
+
+    status = row["status"]
+    error = row["error"] or ""
+    if status == "running":
+        # In the DB as running but absent from this process's memory: the worker
+        # that owned it is gone. Do not lie to the client and let it poll for
+        # ever — report it as interrupted.
+        status, error = "error", _STALE_MSG
+    elif status == "stale":
+        status, error = "error", (error or _STALE_MSG)
+    return {
+        "status": status,
+        "percent": row["percent"],
+        "step": row["step"],
+        "message": row["message"],
+        "eta_ms": row["eta_ms"],
+        "elapsed_ms": 0,
+        "artifact_id": str(row["artifact_id"]) if row["artifact_id"] else "",
+        "error": error,
+    }
+
+
+_STALE_MSG = (
+    "This build was interrupted by a server restart and did not finish. "
+    "Nothing was charged against your quota — please start it again."
+)
+
+
+async def sweep_stale() -> int:
+    """Mark orphaned 'running' rows as stale. Runs once at startup: anything
+    still 'running' with an old heartbeat belongs to a process that is gone."""
+    from app.db import get_pool
+
+    try:
+        pool = await get_pool()
+        n = await pool.fetchval(
+            "WITH upd AS (UPDATE jobs SET status = 'stale', error = $2, updated_at = now() "
+            "WHERE status = 'running' AND heartbeat_at < now() - ($1 || ' seconds')::interval "
+            "RETURNING 1) SELECT count(*) FROM upd",
+            str(JOB_STALE_S), _STALE_MSG,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("stale job sweep failed: %s", e)
+        return 0
+    if n:
+        log.info("marked %d orphaned job(s) stale on startup", n)
+    return int(n or 0)
 
 
 def _gc() -> None:
@@ -149,6 +288,25 @@ class Reporter:
             message=message,
             eta_ms=self.job.remaining_ms(),
         )
+
+
+async def sse_replay(stored: dict):
+    """One-shot SSE for a job that outlived the process that built it.
+
+    There is no event log to replay — that died with the old worker — so we
+    emit the single terminal event the client needs to resolve, in exactly the
+    shape the live stream uses, and close. No template change required.
+    """
+    import json
+
+    if stored["status"] == "done" and stored["artifact_id"]:
+        ev = {"kind": "done", "percent": 100, "artifact_id": stored["artifact_id"],
+              "message": "Publishing pack ready"}
+    else:
+        ev = {"kind": "error",
+              "message": stored["error"] or "This build did not finish.",
+              "detail": ""}
+    yield f"data: {json.dumps(ev)}\n\n"
 
 
 async def sse(job: Job):
