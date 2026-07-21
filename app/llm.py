@@ -20,9 +20,23 @@ GEMINI_URL = (
 # build on the first try — Gemini capacity spikes are normal and short-lived.
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 MAX_ATTEMPTS = 4
-# If the pinned model stays unavailable, fall through to a second model rather
-# than failing the user. Probed available on this key: gemini-flash-latest.
-FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-flash-latest")
+
+# Fallback CHAIN, tried in order after the pinned model exhausts its retries.
+#
+# Hard lesson (2026-07-21): "gemini-flash-latest" was useless as a fallback
+# because it is an ALIAS that resolves to the same model as gemini-3.5-flash —
+# it returned the identical 503 from the identical overloaded capacity pool.
+# Never put a *-latest alias in this chain. Every entry must be a distinct,
+# explicitly-versioned model, verified with a live probe.
+#
+# Probed 2026-07-21 while 3.5-flash was 503: all three below returned 200 and
+# produced correctly-shaped nested JSON. The lite models emit zero thinking
+# tokens, so they are also markedly cheaper if we ever need a cost lever.
+DEFAULT_FALLBACKS = "gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
+FALLBACK_MODELS = [
+    m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", DEFAULT_FALLBACKS).split(",")
+    if m.strip()
+]
 
 
 class LLMError(Exception):
@@ -46,14 +60,16 @@ async def _post_with_retry(api_key: str, model: str, prompt: str, on_retry=None)
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.7},
     }
-    candidates = [model] + ([FALLBACK_MODEL] if FALLBACK_MODEL and FALLBACK_MODEL != model else [])
+    candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
     last_err = "no attempt made"
 
     async with httpx.AsyncClient(timeout=120) as client:
         for m_idx, m in enumerate(candidates):
-            # Give the pinned model the full retry budget; the fallback gets a
-            # shorter one so a total outage still fails in reasonable time.
-            attempts = MAX_ATTEMPTS if m_idx == 0 else 2
+            # Full retry budget for the pinned model; one shot each for the
+            # fallbacks. A fallback that 503s once is genuinely busy too, and
+            # trying the NEXT distinct model beats hammering this one — that is
+            # the whole point of a chain. Keeps worst case bounded.
+            attempts = MAX_ATTEMPTS if m_idx == 0 else 1
             for attempt in range(1, attempts + 1):
                 status = 0
                 try:
