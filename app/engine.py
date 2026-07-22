@@ -4,7 +4,7 @@ import logging
 import statistics
 import time
 
-from app import llm, yt
+from app import llm, vidiq, yt
 
 from app.config import flag
 from app.db import get_pool
@@ -68,12 +68,29 @@ async def build_pack(video_id: str, report=None) -> dict:
     # Free tier ships ONE thumbnail prompt; the paid tier gets 3 for A/B
     # testing. One variable, flag-driven, so the count is instantly reversible.
     n_thumbs = 3 if flag("paid_tier") else 1
+
+    # BYO vidIQ (byo_vidiq flag). When on + a key is set, pull live keyword/SEO
+    # data and hand it to the pack prompt so tags + title come from real data.
+    # keyword_research() returns None on ANY failure (flag off, no key, timeout,
+    # bad shape), so this block is a no-op fallback to the pure-LLM path — the
+    # pack is never blocked on vidIQ.
+    keyword_block = ""
+    kw_rows = await vidiq.keyword_research(meta.get("title", ""))
+    if kw_rows:
+        keyword_block = (
+            "\nKEYWORD RESEARCH (live vidIQ data — term · volume · competition · score):\n"
+            + vidiq.format_for_prompt(kw_rows)
+            + "\n"
+        )
+        report.field("keyword_research", f"{len(kw_rows)} vidIQ keywords")
+
     pack, usage = await llm.generate_json_with_usage(
         llm.PACK_PROMPT.format(
             title=meta.get("title", "(unknown)"),
             channel=meta.get("channel", "(unknown)"),
             transcript=transcript_text or "(no transcript available)",
             n_thumbs=n_thumbs,
+            keyword_data=keyword_block,
         ),
         on_retry=_on_retry,
     )
@@ -118,12 +135,17 @@ async def build_pack(video_id: str, report=None) -> dict:
     pack["localizations"] = {}
     if flag("localization"):
         try:
+            # Localize the FULL description (hook + about) so each language is a
+            # complete, ready-to-paste block in Studio — not just the hook.
+            full_desc = "\n\n".join(
+                p for p in (pack.get("description_hook", ""), pack.get("description_about", "")) if p
+            )
             pack["localizations"], loc_usage = await llm.generate_json_with_usage(
                 llm.LOCALIZE_PROMPT.format(
                     n=len(LOCALES),
                     langs=", ".join(LOCALES),
                     title=pack.get("title", meta.get("title", "")),
-                    description=pack.get("description_hook", ""),
+                    description=full_desc,
                 )
             )
             calls.append({"step": "localization", **loc_usage})
@@ -141,10 +163,30 @@ async def build_pack(video_id: str, report=None) -> dict:
     # Raw ASR SRT is deliberately NOT shipped on the free tier. The user's video
     # already carries these same auto-captions, so handing back a copy adds
     # nothing — and if they upload it, YouTube stops labelling it as automatic,
-    # so every misheard brand name becomes *their* published caption. Cleaned-up
-    # SRT is a paid feature (it needs a full-text LLM rewrite, billed at the
-    # output rate, which roughly doubles the cost of a pack).
-    pack["srt_en"] = yt.transcript_to_srt(segments) if (segments and flag("srt_output")) else ""
+    # so every misheard brand name becomes *their* published caption.
+    #
+    # The paid srt_output feature ships a CLEANED SRT: a full-text LLM rewrite
+    # (punctuation, casing, filler removal, obvious mis-hearing fixes) with the
+    # timing kept verbatim — text and timing stay separate so start/dur are
+    # reused untouched. If the rewrite fails or comes back mis-counted we fall
+    # back to the raw SRT rather than dropping the field, so the paid user still
+    # gets a usable caption file. Billed at the output rate ≈ doubles pack cost.
+    pack["srt_en"] = ""
+    pack["srt_cleaned"] = False
+    if segments and flag("srt_output"):
+        try:
+            cleaned = await llm.generate_cleaned_captions([s["text"] for s in segments])
+            cleaned_segments = [
+                {**seg, "text": (txt or "").strip()}
+                for seg, txt in zip(segments, cleaned)
+            ]
+            # Drop now-empty (filler-only) lines; timing of the rest is intact.
+            cleaned_segments = [s for s in cleaned_segments if s["text"]]
+            pack["srt_en"] = yt.transcript_to_srt(cleaned_segments)
+            pack["srt_cleaned"] = True
+        except llm.LLMError as e:
+            log.warning("cleaned SRT failed, falling back to raw: %s", e)
+            pack["srt_en"] = yt.transcript_to_srt(segments)
     # Only announce the field when it actually ships. Otherwise the progress
     # stream would advertise a "paid feature" that does not exist yet, and
     # artifact.html already hides the card via {% if pack.srt_en %}.

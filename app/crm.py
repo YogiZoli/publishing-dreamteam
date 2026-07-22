@@ -5,7 +5,7 @@ import logging
 
 import httpx
 
-from app.config import get_settings
+from app.config import flag, get_settings
 
 log = logging.getLogger("crm")
 
@@ -56,7 +56,15 @@ def get_crm() -> BaseCRM:
 
 
 async def upsert_lead_safe(email: str, name: str) -> None:
-    """Never let CRM failures break the user flow."""
+    """Never let CRM failures break the user flow.
+
+    Gated on the crm_connector flag: the lead write only fires when the operator
+    has explicitly switched the connector on (and configured a token). Flag off
+    ⇒ no outbound CRM call at all — the default, so sign-in stays a pure local
+    operation until the connector is deliberately enabled.
+    """
+    if not flag("crm_connector"):
+        return
     try:
         await get_crm().upsert_lead(email, name)
     except Exception as e:  # noqa: BLE001

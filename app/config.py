@@ -68,6 +68,25 @@ class Settings(BaseSettings):
     # transcript_egress=proxy. Lives ONLY in Railway env vars, never in code.
     transcript_proxy_url: str = os.getenv("TRANSCRIPT_PROXY_URL", "")
 
+    # BYO vidIQ keyword research (byo_vidiq flag). "Bring your own": the key is
+    # the operator's own vidIQ token, supplied via env — the app never ships a
+    # key. When the flag is on AND a key is set, the engine fetches real
+    # keyword/volume/competition data and feeds it to the pack prompt so tags
+    # and title come from live SEO data instead of the model's priors. Any
+    # failure (no key, timeout, non-200, bad shape) degrades silently to the
+    # pure-LLM path — the pack is never blocked on vidIQ. Endpoint + auth style
+    # are configurable so a change on vidIQ's side is an env edit, not a deploy.
+    vidiq_api_key: str = os.getenv("VIDIQ_API_KEY", "")
+    vidiq_base_url: str = os.getenv(
+        "VIDIQ_BASE_URL", "https://api.vidiq.com"
+    )
+    # Path template for the keyword endpoint; {q} is the URL-encoded query.
+    vidiq_keywords_path: str = os.getenv(
+        "VIDIQ_KEYWORDS_PATH", "/v1/keyword/search?q={q}"
+    )
+    # "bearer" -> Authorization: Bearer <key>; "header" -> a raw x-api-key.
+    vidiq_auth_style: str = os.getenv("VIDIQ_AUTH_STYLE", "bearer")
+
     # Bearer token for /admin/flags. If empty, the admin endpoints refuse every
     # request — an unset token must never mean "open", it means "closed".
     admin_token: str = os.getenv("ADMIN_TOKEN", "")

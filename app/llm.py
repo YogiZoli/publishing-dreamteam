@@ -160,12 +160,14 @@ produce a complete publishing pack as strict JSON.
 VIDEO TITLE (original): {title}
 CHANNEL: {channel}
 TRANSCRIPT (may be empty): {transcript}
-
+{keyword_data}
 Rules:
 - title: under 60 chars, primary keyword in the first half, compelling promise, no clickbait words like hack/trick/easy.
 - description_hook: 1 paragraph, first 150 chars must compel the click, no "in this video", no emojis.
 - description_about: 2-3 sentences about the creator + subscribe CTA (generic, second person).
 - tags: 25-35 comma-free tag strings ordered by SEO value (mix of exact keyword, variations, broader topics).
+  If a "KEYWORD RESEARCH" block is present above, treat it as authoritative live SEO data: prioritise its
+  high-volume / low-competition terms in the tags AND weave the strongest one into the title verbatim.
 - hashtags: exactly 3, with # prefix.
 - pinned_comment: a specific engagement question about the video's core promise.
 - chapters: list of {{"time": "m:ss", "title": "..."}}. First MUST be 0:00 Introduction. 5-10 chapters,
@@ -177,8 +179,13 @@ Rules:
   "Use the attached profile photo as the main subject's face - preserve his exact likeness, do not
   alter facial features. The right side of the face faces forward and the right hand points to the left."
   Plus: 1280x720 16:9, bold 3-5 word overlay matching the title promise, high contrast, readable at
-  120x68 px, one focal point, and a concrete scene derived from this video's topic (make each distinct
-  if more than one is requested).
+  120x68 px, one focal point, and a concrete scene derived from this video's topic.
+  A/B RULE: when more than one prompt is requested, they are competing A/B variants — make each a
+  GENUINELY different testable bet, not a cosmetic tweak. Vary the lever deliberately: variant 1 =
+  face/emotion-led close-up, variant 2 = object/result-led scene, variant 3 = text/curiosity-gap led.
+  Each must still preserve the exact likeness sentence above and target the same video promise, so the
+  only thing under test is the visual angle. Prefix each prompt's overlay idea so the operator can tell
+  the variants apart at a glance.
 - cards: exactly 2 objects, each {{"time": "m:ss", "element": "Video|Playlist|Channel", "note": "..."}}.
   Decide each card individually from THIS video's actual content — do NOT use a fixed template. Read the
   transcript and pick the two specific moments where it is most natural to point the viewer to more of the
@@ -195,8 +202,51 @@ pinned_comment, chapters (array), thumbnail_prompts (array of {n_thumbs}), cards
 end_screen (array of 2)."""
 
 
-LOCALIZE_PROMPT = """Translate this YouTube title and description hook into the {n} languages listed.
-Title max 100 chars per language. Return strict JSON: an object keyed by language code, each value
+CLEAN_SRT_PROMPT = """You are cleaning up a raw YouTube auto-caption transcript.
+Below is a JSON array of caption lines, in order. Each is raw ASR text: missing
+punctuation, wrong casing, filler words ("um", "uh", "you know"), false starts
+and occasional mis-heard words.
+
+Return STRICT JSON: an object {{"lines": [...]}} whose "lines" array has EXACTLY
+{n} strings, one per input line, in the SAME ORDER. For each line:
+- fix punctuation, capitalisation and obvious grammar,
+- remove filler words and stutters,
+- correct clear mis-hearings only when unambiguous from context,
+- DO NOT merge, split, reorder, add or drop lines — the count MUST stay {n},
+- DO NOT translate; keep the original language,
+- if a line is only filler, return it as an empty string "" (keep the slot).
+
+Raw lines:
+{lines}"""
+
+
+async def generate_cleaned_captions(texts: list[str]) -> list[str]:
+    """LLM-clean a list of caption texts, preserving order and count.
+
+    The timing (start/dur) is handled by the caller and never touched here — we
+    only rewrite text. Returns a list of the SAME length as ``texts``; raises
+    LLMError if the model returns a different count so the caller can fall back
+    to the raw SRT rather than shipping misaligned captions.
+    """
+    if not texts:
+        return []
+    payload = json.dumps(texts, ensure_ascii=False)
+    data, _usage = await generate_json_with_usage(
+        CLEAN_SRT_PROMPT.format(n=len(texts), lines=payload)
+    )
+    lines = data.get("lines")
+    if not isinstance(lines, list) or len(lines) != len(texts):
+        raise LLMError(
+            f"cleaned caption count mismatch: got {len(lines) if isinstance(lines, list) else 'n/a'}, "
+            f"expected {len(texts)}"
+        )
+    return [str(x) for x in lines]
+
+
+LOCALIZE_PROMPT = """Translate this YouTube title and description into ALL {n} languages listed — no omissions.
+Title max 100 chars per language; keep the primary keyword. Translate the description in full (all
+paragraphs), natural and idiomatic, not word-for-word. Return STRICT JSON: an object keyed by the
+EXACT language codes given below (one key per code, all {n} present), each value
 {{"title": "...", "description": "..."}}.
 
 Languages: {langs}
