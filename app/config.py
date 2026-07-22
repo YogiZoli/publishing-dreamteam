@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     # Comma-separated emails exempt from all quota checks (owner/testing).
     unlimited_emails: str = os.getenv("UNLIMITED_EMAILS", "humorketing@gmail.com")
 
+    # Accurate-chapter transcript egress (Session 7 C0). YouTube blocks
+    # Railway's datacenter IP, so the caption fetch needs a clean egress:
+    #   none  = disabled (behaves like before — direct fetch, estimated on prod)
+    #   local = direct fetch, NO proxy. Works only on a residential IP (dev). $0.
+    #   proxy = route through a residential HTTP proxy (required on Railway).
+    # Only consulted when the transcript_proxy flag is on.
+    transcript_egress: str = os.getenv("TRANSCRIPT_EGRESS", "none")
+    # Generic HTTP proxy URL (e.g. http://user:pass@host:port) used when
+    # transcript_egress=proxy. Lives ONLY in Railway env vars, never in code.
+    transcript_proxy_url: str = os.getenv("TRANSCRIPT_PROXY_URL", "")
+
     # Bearer token for /admin/flags. If empty, the admin endpoints refuse every
     # request — an unset token must never mean "open", it means "closed".
     admin_token: str = os.getenv("ADMIN_TOKEN", "")
@@ -85,6 +96,12 @@ FEATURE_FLAGS: dict[str, bool] = {
     # CLEANED SRT instead (full-text LLM rewrite = output-rate tokens).
     "srt_output": _env_flag("srt_output", False),
     "yt_write_path": _env_flag("yt_write_path", False),
+    # Accurate chapters from YouTube's own auto-caption track via a residential
+    # egress, with async backfill upgrading estimated chapters when captions
+    # land. OFF: prod fetch is IP-blocked without a proxy, so leave estimated
+    # until the egress (local dev IP or a residential proxy) is wired. See the
+    # Session 7 C0 brief in the handover.
+    "transcript_proxy": _env_flag("transcript_proxy", False),
 }
 
 

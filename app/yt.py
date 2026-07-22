@@ -36,6 +36,33 @@ async def fetch_metadata(video_id: str) -> dict:
 EN_LANGS = ("en", "en-US", "en-GB")
 
 
+def _build_api():
+    """Construct a YouTubeTranscriptApi honouring the TRANSCRIPT_EGRESS switch.
+
+    YouTube blanket-blocks Railway's datacenter egress IP (RequestBlocked on
+    the first request), so on production the caption fetch must go through a
+    residential proxy. Locked against the installed youtube-transcript-api
+    (1.2.x): proxies are configured with a GenericProxyConfig passed to the
+    constructor — read from source, not memory.
+
+    Only routes through a proxy when the transcript_proxy flag is on AND
+    egress=proxy AND a URL is set; otherwise a plain (direct) client, which is
+    exactly today's behaviour and works from any residential IP (dev, 'local').
+    """
+    from app.config import flag, get_settings
+    from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api.proxies import GenericProxyConfig
+
+    settings = get_settings()
+    egress = (settings.transcript_egress or "none").lower()
+    if flag("transcript_proxy") and egress == "proxy" and settings.transcript_proxy_url:
+        url = settings.transcript_proxy_url
+        return YouTubeTranscriptApi(
+            proxy_config=GenericProxyConfig(http_url=url, https_url=url)
+        )
+    return YouTubeTranscriptApi()
+
+
 def _fetch_transcript_sync(video_id: str) -> list[dict]:
     """Blocking fetch of YouTube's timed caption track (English only).
 
@@ -45,13 +72,20 @@ def _fetch_transcript_sync(video_id: str) -> list[dict]:
     boundaries depend on. This is the whole reason chapters stopped being a
     "130 wpm" guess.
 
-    English only, deliberately: translation is a paid-tier feature, and this
-    app never machine-translates on the free tier.
+    Prefers YouTube's own auto-generated (ASR) English track — the "en-orig"
+    true machine transcription the C0 brief calls for — and only falls back to
+    a manually-created English track if no ASR one exists. English only,
+    deliberately: translation is a paid-tier feature and this app never
+    machine-translates on the free tier.
     """
-    from youtube_transcript_api import YouTubeTranscriptApi
-
-    api = YouTubeTranscriptApi()
-    fetched = api.fetch(video_id, languages=list(EN_LANGS))
+    api = _build_api()
+    tlist = api.list(video_id)
+    try:
+        transcript = tlist.find_generated_transcript(list(EN_LANGS))
+    except Exception:
+        # No ASR track — accept any English track rather than failing the pack.
+        transcript = tlist.find_transcript(list(EN_LANGS))
+    fetched = transcript.fetch()
     return [
         {
             "start": float(s.start),

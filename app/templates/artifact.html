@@ -37,7 +37,7 @@ CHAPTERS
 {{ pack.description_about }}
 
 {{ pack.hashtags | join(' ') }}</pre>
-{% if pack.chapters_estimated %}<span class="badge warn">Chapters estimated — verify one timestamp before saving</span>{% endif %}</div>
+{% if pack.chapters_estimated %}{% if transcript_proxy %}<span class="badge warn" id="chapfinalizing">⏳ Accurate chapters are finalizing in the background and will update automatically.</span>{% else %}<span class="badge warn">Chapters estimated — verify one timestamp before saving</span>{% endif %}{% endif %}</div>
 
 <div class="card"><h2>3 · Tags <span class="badge" id="tagbadge"></span> <button class="copy" data-t="tags">Copy</button></h2>
 <pre id="tags">{{ pack.tags | join(', ') }}</pre></div>
@@ -109,6 +109,22 @@ document.querySelectorAll('button.copy').forEach(btn=>{
   setTimeout(()=>{btn.textContent=old;btn.classList.remove('ok');},1500);
  });
 });
+{% if pack.chapters_estimated and transcript_proxy %}
+// Async backfill is running server-side. Poll until chapters are upgraded to
+// real timing, then reload once so the description + chapters cards refresh.
+(function(){
+ const AID={{ artifact_id | tojson }};
+ let tries=0;
+ const iv=setInterval(async()=>{
+  tries++;
+  try{
+   const r=await fetch(`/artifact/${AID}/chapters_status`,{credentials:'same-origin'});
+   if(r.ok){const d=await r.json();if(!d.estimated){clearInterval(iv);location.reload();}}
+  }catch(e){}
+  if(tries>=50)clearInterval(iv); // ~25 min at 30s, matches the backfill window
+ },30000);
+})();
+{% endif %}
 </script>
 </body>
 </html>

@@ -169,6 +169,15 @@ async def _run_job(job, user_id: str, ip: str) -> None:
             message="Publishing pack ready",
             usage=pack.get("usage", {}),
         )
+        # Estimated chapters + a working egress ⇒ kick off async backfill: a
+        # background task retries the caption fetch on a minute scale and, when
+        # captions land, upgrades this video's artifacts to real timing. Gated
+        # on the flag because without an egress (dev IP / residential proxy)
+        # the fetch cannot succeed on prod.
+        if pack.get("chapters_estimated") and flag("transcript_proxy"):
+            from app import backfill
+
+            backfill.schedule(job.video_id)
     except LLMError as e:
         log.error("LLMError on job %s (video %s): %s", job.id, job.video_id, e)
         job.status = "error"
@@ -276,5 +285,25 @@ async def view_artifact(request: Request, artifact_id: str):
     return templates.TemplateResponse(
         request=request,
         name="artifact.html",
-        context={"pack": pack, "paid_tier": flag("paid_tier")},
+        context={
+            "pack": pack,
+            "paid_tier": flag("paid_tier"),
+            "transcript_proxy": flag("transcript_proxy"),
+            "artifact_id": artifact_id,
+        },
     )
+
+
+@app.get("/artifact/{artifact_id}/chapters_status")
+async def chapters_status(request: Request, artifact_id: str):
+    """Tiny poll target so an artifact page with estimated chapters can auto-
+    refresh once the async backfill upgrades them to real timing."""
+    user_id = request.session.get("user_id")
+    if not user_id:
+        raise HTTPException(404, "Artifact not found")
+    from app import engine
+
+    pack = await engine.get_pack(artifact_id, user_id)
+    if pack is None:
+        raise HTTPException(404, "Artifact not found")
+    return {"estimated": bool(pack.get("chapters_estimated"))}
