@@ -78,23 +78,49 @@ def _fetch_transcript_sync(video_id: str) -> list[dict]:
     deliberately: translation is a paid-tier feature and this app never
     machine-translates on the free tier.
     """
-    api = _build_api()
-    tlist = api.list(video_id)
-    try:
-        transcript = tlist.find_generated_transcript(list(EN_LANGS))
-    except Exception:
-        # No ASR track — accept any English track rather than failing the pack.
-        transcript = tlist.find_transcript(list(EN_LANGS))
-    fetched = transcript.fetch()
-    return [
-        {
-            "start": float(s.start),
-            "dur": float(s.duration),
-            "text": (s.text or "").replace("\n", " ").strip(),
-        }
-        for s in fetched
-        if (s.text or "").strip()
-    ]
+    from youtube_transcript_api._errors import IpBlocked, RequestBlocked
+    from app.config import flag, get_settings
+
+    # A rotating residential proxy hands out a fresh exit IP per connection, and
+    # a fraction of those IPs are already flagged by YouTube → IpBlocked on that
+    # single attempt. A new api instance = a new tunnel = a new IP, so on the
+    # proxied path we retry a few times rather than falling straight back to
+    # estimated chapters. Direct (non-proxy) egress gets one shot as before.
+    proxied = (
+        flag("transcript_proxy")
+        and (get_settings().transcript_egress or "").lower() == "proxy"
+    )
+    attempts = 3 if proxied else 1
+    last_block = None
+    for _ in range(attempts):
+        api = _build_api()
+        try:
+            tlist = api.list(video_id)
+        except (IpBlocked, RequestBlocked) as e:
+            last_block = e  # flagged exit IP — rotate and retry
+            continue
+        try:
+            transcript = tlist.find_generated_transcript(list(EN_LANGS))
+        except Exception:
+            # No ASR track — accept any English track rather than failing.
+            transcript = tlist.find_transcript(list(EN_LANGS))
+        try:
+            fetched = transcript.fetch()
+        except (IpBlocked, RequestBlocked) as e:
+            last_block = e
+            continue
+        return [
+            {
+                "start": float(s.start),
+                "dur": float(s.duration),
+                "text": (s.text or "").replace("\n", " ").strip(),
+            }
+            for s in fetched
+            if (s.text or "").strip()
+        ]
+    # Every attempt hit a blocked exit IP. Raise so fetch_transcript logs it and
+    # degrades to estimated chapters; the async backfill will try again later.
+    raise last_block if last_block else RuntimeError("transcript fetch failed")
 
 
 async def fetch_transcript(video_id: str) -> list[dict]:
