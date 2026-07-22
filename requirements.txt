@@ -12,3 +12,7 @@ python-multipart>=0.0.9
 # used is dead — it returns HTTP 200 with 0 bytes for every video, listed or
 # not (probed 2026-07-21), which is why every pack had estimated chapters.
 youtube-transcript-api>=1.0
+# BYO vidIQ (byo_vidiq flag). vidIQ has no plain REST API, only an MCP server
+# (mcp.vidiq.com/mcp) — see app/vidiq.py. Bearer-token API key auth confirmed
+# working against this SDK's streamable-http client 2026-07-23.
+mcp>=1.27

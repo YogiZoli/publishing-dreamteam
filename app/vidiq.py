@@ -1,75 +1,92 @@
-"""BYO vidIQ keyword-research adapter.
+"""BYO vidIQ keyword-research adapter — real MCP client (Session 11 rebuild).
 
 "Bring your own": the operator supplies their OWN vidIQ token in the
 VIDIQ_API_KEY env var — the app never carries a key. The engine calls
 ``keyword_research()`` before building the pack; when the byo_vidiq flag is on
-and a key is set, it returns live keyword rows (term + search volume +
-competition + related terms) that get injected into the pack prompt so tags and
-the title come from real SEO data rather than the model's priors.
+and a key is set, it returns live keyword rows (term + volume + competition +
+overall score + estimated monthly search) that get injected into the pack
+prompt so tags and the title come from real SEO data rather than the model's
+priors.
 
-Design rule (from the handover): vidIQ is an ENHANCEMENT, never a dependency.
-Every failure path — flag off, no key, timeout, non-200, unexpected JSON shape —
-returns None, and the caller falls straight back to the pure-LLM path. A pack is
-never blocked or broken because vidIQ was unreachable. The endpoint, auth style
-and path are all env-configurable, so if vidIQ changes their API it is a Railway
-variable edit, not a redeploy.
+CORRECTED 2026-07-23 (Session 11): vidIQ has NO plain REST API for
+developers — the original design here (a bare HTTP GET against
+VIDIQ_BASE_URL + VIDIQ_KEYWORDS_PATH) was built on a wrong assumption and
+always 403'd (confirmed live, and via https://vidiq.com/mcp/). vidIQ only
+exposes an MCP server at VIDIQ_MCP_URL (default https://mcp.vidiq.com/mcp),
+speaking the standard MCP protocol over Streamable HTTP. Live-tested
+2026-07-23: `Authorization: Bearer <VIDIQ_API_KEY>` works for a plain API key
+(no OAuth dance needed) — confirmed with a real tools/list + a real
+vidiq_keyword_research call returning live data. This module is a thin async
+MCP client scoped to exactly that one tool call.
+
+Design rule (unchanged from the original adapter): vidIQ is an ENHANCEMENT,
+never a dependency. Every failure path — flag off, no key, timeout, MCP
+error, unexpected response shape — returns None, and the caller falls
+straight back to the pure-LLM path. A pack is never blocked or broken because
+vidIQ was unreachable.
 """
+import asyncio
+import json
 import logging
-from urllib.parse import quote
-
-import httpx
 
 from app.config import flag, get_settings
 
 log = logging.getLogger("dreamteam.vidiq")
 
-
-def _auth_headers(style: str, key: str) -> dict:
-    if style.lower() == "header":
-        return {"x-api-key": key}
-    return {"Authorization": f"Bearer {key}"}
+MAX_ROWS = 20
+CALL_TIMEOUT_S = 20
+TOOL_NAME = "vidiq_keyword_research"
 
 
-def _coerce_rows(data) -> list[dict]:
-    """Normalise assorted vidIQ response shapes into a flat list of dicts.
+def _row(item: dict) -> dict:
+    return {
+        "keyword": str(item.get("keyword", "")).strip(),
+        "volume": item.get("volume"),
+        "competition": item.get("competition"),
+        "score": item.get("overall"),
+        "monthly_search": item.get("estimatedMonthlySearch"),
+    }
 
-    vidIQ's payloads vary by endpoint/plan, so accept the common containers
-    ({"keywords": [...]}, {"results": [...]}, {"data": [...]} or a bare list)
-    and keep only the fields we use. Unknown shape -> empty list, which the
-    caller treats as "no data" and falls back to the LLM.
+
+def _rows_from_result(data: dict) -> list[dict]:
+    """vidIQ's keyword_research shape: {seedKeyword: {...}, relatedKeywords: [...]}.
+
+    Not a flat list — the seed term and its related terms are separate keys.
+    Flatten both into one list, seed first, for format_for_prompt().
     """
-    if isinstance(data, dict):
-        for k in ("keywords", "results", "data", "items"):
-            if isinstance(data.get(k), list):
-                data = data[k]
-                break
-    if not isinstance(data, list):
-        return []
     rows: list[dict] = []
-    for item in data:
-        if not isinstance(item, dict):
-            # A bare list of strings is still useful as raw terms.
-            if isinstance(item, str) and item.strip():
-                rows.append({"keyword": item.strip()})
-            continue
-        term = (
-            item.get("keyword")
-            or item.get("term")
-            or item.get("query")
-            or item.get("text")
-            or ""
-        )
-        if not str(term).strip():
-            continue
-        rows.append(
-            {
-                "keyword": str(term).strip(),
-                "volume": item.get("volume") or item.get("search_volume"),
-                "competition": item.get("competition") or item.get("difficulty"),
-                "score": item.get("score") or item.get("overall"),
-            }
-        )
+    seed = data.get("seedKeyword")
+    if isinstance(seed, dict) and str(seed.get("keyword", "")).strip():
+        rows.append(_row(seed))
+    for item in data.get("relatedKeywords") or []:
+        if isinstance(item, dict) and str(item.get("keyword", "")).strip():
+            rows.append(_row(item))
     return rows
+
+
+async def _call_mcp(query: str, api_key: str, mcp_url: str) -> dict | None:
+    """One MCP round-trip: initialize -> call vidiq_keyword_research -> parse.
+
+    A fresh session per call (no persistent connection) — pack builds are
+    infrequent enough (free-tier rate limits) that connection reuse is not
+    worth the complexity of keeping an MCP session alive across requests.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with streamablehttp_client(mcp_url, headers=headers) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(
+                TOOL_NAME, {"keyword": query[:100], "mode": "research"}
+            )
+    if getattr(result, "isError", False):
+        raise RuntimeError(f"vidIQ tool error: {result.content!r}")
+    text = next((c.text for c in result.content if hasattr(c, "text")), None)
+    if not text:
+        return None
+    return json.loads(text)
 
 
 async def keyword_research(query: str) -> list[dict] | None:
@@ -82,24 +99,25 @@ async def keyword_research(query: str) -> list[dict] | None:
     s = get_settings()
     if not (s.vidiq_api_key and query.strip()):
         return None
-    path = s.vidiq_keywords_path.replace("{q}", quote(query.strip()))
-    url = s.vidiq_base_url.rstrip("/") + "/" + path.lstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            r = await client.get(
-                url, headers=_auth_headers(s.vidiq_auth_style, s.vidiq_api_key)
-            )
-        if r.status_code != 200:
-            log.warning("vidiq non-200 status=%s body=%s", r.status_code, r.text[:160])
+        data = await asyncio.wait_for(
+            _call_mcp(query.strip(), s.vidiq_api_key, s.vidiq_mcp_url),
+            timeout=CALL_TIMEOUT_S,
+        )
+        if not data:
+            log.warning("vidiq MCP call returned no parseable content")
             return None
-        rows = _coerce_rows(r.json())
+        rows = _rows_from_result(data)
         if not rows:
             log.warning("vidiq returned no usable rows for query=%r", query[:60])
             return None
         log.info("vidiq keywords query=%r rows=%d", query[:60], len(rows))
-        return rows[:40]
+        return rows[:MAX_ROWS]
     except Exception as e:  # noqa: BLE001 — enhancement must never break a pack
-        log.warning("vidiq lookup failed (%s: %s) — falling back to LLM", type(e).__name__, str(e)[:160])
+        log.warning(
+            "vidiq MCP lookup failed (%s: %s) — falling back to LLM",
+            type(e).__name__, str(e)[:160],
+        )
         return None
 
 
@@ -108,11 +126,23 @@ def format_for_prompt(rows: list[dict]) -> str:
     lines = []
     for r in rows:
         parts = [r["keyword"]]
+        if r.get("monthly_search") is not None:
+            try:
+                parts.append(f"~{int(r['monthly_search']):,}/mo")
+            except (TypeError, ValueError):
+                pass
         if r.get("volume") is not None:
-            parts.append(f"vol={r['volume']}")
+            parts.append(f"vol={_fmt_num(r['volume'])}")
         if r.get("competition") is not None:
-            parts.append(f"comp={r['competition']}")
+            parts.append(f"comp={_fmt_num(r['competition'])}")
         if r.get("score") is not None:
-            parts.append(f"score={r['score']}")
+            parts.append(f"score={_fmt_num(r['score'])}")
         lines.append(" · ".join(str(p) for p in parts))
     return "\n".join(lines)
+
+
+def _fmt_num(v) -> str:
+    try:
+        return f"{float(v):.0f}"
+    except (TypeError, ValueError):
+        return str(v)

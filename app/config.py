@@ -73,19 +73,20 @@ class Settings(BaseSettings):
     # key. When the flag is on AND a key is set, the engine fetches real
     # keyword/volume/competition data and feeds it to the pack prompt so tags
     # and title come from live SEO data instead of the model's priors. Any
-    # failure (no key, timeout, non-200, bad shape) degrades silently to the
-    # pure-LLM path — the pack is never blocked on vidIQ. Endpoint + auth style
-    # are configurable so a change on vidIQ's side is an env edit, not a deploy.
+    # failure (no key, timeout, bad shape, MCP error) degrades silently to the
+    # pure-LLM path — the pack is never blocked on vidIQ.
+    #
+    # CORRECTED 2026-07-23 (Session 11): vidIQ has NO plain REST API — it only
+    # exposes an MCP server (confirmed via https://vidiq.com/mcp/ and a live
+    # test). The original VIDIQ_BASE_URL/VIDIQ_KEYWORDS_PATH/VIDIQ_AUTH_STYLE
+    # design assumed a REST endpoint that does not exist and always 403'd.
+    # Live-verified 2026-07-23: Authorization: Bearer <VIDIQ_API_KEY> against
+    # the MCP endpoint below DOES work for a plain API key (no OAuth needed),
+    # despite vidIQ's own developer FAQ claiming "authentication is OAuth 2.0"
+    # — the marketing page's "API key (recommended)" claim is the one that
+    # held up under test.
     vidiq_api_key: str = os.getenv("VIDIQ_API_KEY", "")
-    vidiq_base_url: str = os.getenv(
-        "VIDIQ_BASE_URL", "https://api.vidiq.com"
-    )
-    # Path template for the keyword endpoint; {q} is the URL-encoded query.
-    vidiq_keywords_path: str = os.getenv(
-        "VIDIQ_KEYWORDS_PATH", "/v1/keyword/search?q={q}"
-    )
-    # "bearer" -> Authorization: Bearer <key>; "header" -> a raw x-api-key.
-    vidiq_auth_style: str = os.getenv("VIDIQ_AUTH_STYLE", "bearer")
+    vidiq_mcp_url: str = os.getenv("VIDIQ_MCP_URL", "https://mcp.vidiq.com/mcp")
 
     # Bearer token for /admin/flags. If empty, the admin endpoints refuse every
     # request — an unset token must never mean "open", it means "closed".
