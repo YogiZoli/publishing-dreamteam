@@ -7,9 +7,10 @@
 <style>
  body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#fafafa;color:#1d1d1f;max-width:860px;margin:0 auto;padding:40px 20px}
  .card{background:#fff;border:1px solid #e5e5e5;border-radius:10px;padding:18px;margin-bottom:18px}
- .card h2{font-size:1rem;margin:0 0 10px;display:flex;justify-content:space-between;align-items:center}
+ .card h2{font-size:1rem;margin:0 0 10px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+ .card h2 .lbl{display:inline-flex;align-items:center}
  pre{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:.88rem;background:#f6f6f7;border-radius:6px;padding:12px;margin:0}
- button.copy{background:#1d1d1f;color:#fff;border:0;border-radius:6px;padding:6px 14px;font-size:.8rem;cursor:pointer}
+ button.copy{background:#1d1d1f;color:#fff;border:0;border-radius:6px;padding:6px 14px;font-size:.8rem;cursor:pointer;white-space:nowrap}
  button.copy.ok{background:#2a9d3a}
  .badge{font-size:.75rem;background:#eef;border-radius:10px;padding:2px 10px;margin-left:8px}
  .badge.warn{background:#fde8e8}
@@ -19,16 +20,19 @@
  .teaser a{color:#ffd166}
  .locale{margin-bottom:8px}
  details summary{cursor:pointer;font-weight:600}
+ .info{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#c7c7cc;color:#fff;font-size:.72rem;font-weight:700;font-style:italic;font-family:Georgia,serif;cursor:help;position:relative;margin-left:7px;flex:none}
+ .info:hover::after{content:attr(data-tip);position:absolute;left:0;top:24px;width:250px;background:#1d1d1f;color:#fff;padding:9px 11px;border-radius:7px;font-size:.72rem;font-weight:400;font-style:normal;line-height:1.4;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;text-align:left;z-index:20;box-shadow:0 6px 18px rgba(0,0,0,.22)}
+ .info:hover::before{content:'';position:absolute;left:6px;top:18px;border:6px solid transparent;border-bottom-color:#1d1d1f;z-index:20}
 </style>
 </head>
 <body>
 <h1>Publishing Pack</h1>
 <p><a href="/app">← New pack</a></p>
 
-<div class="card"><h2>1 · Title <button class="copy" data-t="title">Copy</button></h2>
+<div class="card"><h2><span class="lbl">1 · Title <span class="info" data-tip="Your optimized video title. Paste into YouTube Studio → Content → your video → Details → Title.">i</span></span> <button class="copy" data-t="title">Copy</button></h2>
 <pre id="title">{{ pack.title }}</pre></div>
 
-<div class="card"><h2>2 · Description <button class="copy" data-t="desc">Copy</button></h2>
+<div class="card"><h2><span class="lbl">2 · Description <span class="info" data-tip="The full description incl. chapters, about-text and hashtags. Paste into YouTube Studio → Details → Description.">i</span></span> <button class="copy" data-t="desc">Copy</button></h2>
 <pre id="desc">{{ pack.description_hook }}
 
 CHAPTERS
@@ -39,39 +43,47 @@ CHAPTERS
 {{ pack.hashtags | join(' ') }}</pre>
 {% if pack.chapters_estimated %}{% if transcript_proxy %}<span class="badge warn" id="chapfinalizing">⏳ Accurate chapters are finalizing in the background and will update automatically.</span>{% else %}<span class="badge warn">Chapters estimated — verify one timestamp before saving</span>{% endif %}{% endif %}</div>
 
-<div class="card"><h2>3 · Tags <span class="badge" id="tagbadge"></span> <button class="copy" data-t="tags">Copy</button></h2>
+<div class="card"><h2><span class="lbl">3 · Tags <span class="badge" id="tagbadge"></span> <span class="info" data-tip="SEO tags. YouTube Studio → Details → Show more → Tags. Paste the whole comma-separated line.">i</span></span> <button class="copy" data-t="tags">Copy</button></h2>
 <pre id="tags">{{ pack.tags | join(', ') }}</pre></div>
 
-<div class="card"><h2>4 · Hashtags <button class="copy" data-t="hash">Copy</button></h2>
+<div class="card"><h2><span class="lbl">4 · Hashtags <span class="info" data-tip="Put these at the end of your description. The first 3 show above the video title.">i</span></span> <button class="copy" data-t="hash">Copy</button></h2>
 <pre id="hash">{{ pack.hashtags | join(' ') }}</pre></div>
 
-<div class="card"><h2>5 · Pinned comment <button class="copy" data-t="pin">Copy</button></h2>
+<div class="card"><h2><span class="lbl">5 · Pinned comment <span class="info" data-tip="Post this as a comment on your own video, then click the ⋮ menu on it → Pin. Drives engagement.">i</span></span> <button class="copy" data-t="pin">Copy</button></h2>
 <pre id="pin">{{ pack.pinned_comment }}</pre></div>
 
-<div class="card amber"><h2>6 · Settings checklist</h2>
+<div class="card amber"><h2><span class="lbl">6 · Settings checklist <span class="info" data-tip="Set these toggles in YouTube Studio → Details & Audience before publishing.">i</span></span></h2>
 <pre>Not made for kids · AI-content disclosure (if applicable) · Category: Education / Science &amp; Tech · Language: English · Add to your playlist</pre></div>
 
-<div class="card"><h2>7 · Cards &amp; End screen</h2>
-<pre>{{ pack.cards_endscreen }}</pre></div>
+<div class="card"><h2><span class="lbl">7 · Cards <span class="info" data-tip="Interactive cards that pop up during playback. Studio → your video → Editor → Cards. Add a card at each time shown, and link ONLY your own video / playlist / channel — never an external link.">i</span></span> <button class="copy" data-t="cards">Copy</button></h2>
+{% if pack.cards %}<pre id="cards">{% for c in pack.cards %}{{ c.time }} — {{ c.element }} card → {{ c.note }}
+{% endfor %}</pre>
+{% elif pack.cards_endscreen %}<pre id="cards">{{ pack.cards_endscreen }}</pre>
+{% else %}<pre id="cards">No card suggestions for this video.</pre>{% endif %}</div>
 
-<div class="card"><h2>8 · Chapters <button class="copy" data-t="chap">Copy</button></h2>
+<div class="card"><h2><span class="lbl">8 · End screen <span class="info" data-tip="Shown in the final 5–20 seconds. Studio → Editor → End screen. Add the elements shown; any video/playlist/channel element must be your OWN content.">i</span></span> <button class="copy" data-t="endscreen">Copy</button></h2>
+{% if pack.end_screen %}<pre id="endscreen">{% for e in pack.end_screen %}{{ e.time }} — {{ e.element }} → {{ e.note }}
+{% endfor %}</pre>
+{% else %}<pre id="endscreen">Add a Subscribe element and one video/playlist element (your own content) in the last 5–20 seconds.</pre>{% endif %}</div>
+
+<div class="card"><h2><span class="lbl">9 · Chapters <span class="info" data-tip="Already included inside the description above — this is a copy-only view if you want them separately.">i</span></span> <button class="copy" data-t="chap">Copy</button></h2>
 <pre id="chap">{% for c in pack.chapters %}{{ c.time }} {{ c.title }}
 {% endfor %}</pre></div>
 
-<div class="card purple"><h2>9 · Thumbnail prompts</h2>
+<div class="card purple"><h2><span class="lbl">10 · Thumbnail prompt{{ 's' if pack.thumbnail_prompts|length > 1 else '' }} <span class="info" data-tip="Paste each prompt into your image AI (e.g. Nano Banana / Midjourney) WITH your profile photo attached to generate the 1280×720 thumbnail.">i</span></span>{% if pack.thumbnail_prompts|length == 1 %} <button class="copy" data-t="thumb1">Copy</button>{% endif %}</h2>
 {% for p in pack.thumbnail_prompts %}
-<h2>Prompt {{ loop.index }} <button class="copy" data-t="thumb{{ loop.index }}">Copy</button></h2>
+{% if pack.thumbnail_prompts|length > 1 %}<h2><span class="lbl">Prompt {{ loop.index }}</span> <button class="copy" data-t="thumb{{ loop.index }}">Copy</button></h2>{% endif %}
 <pre id="thumb{{ loop.index }}">{{ p }}</pre>
 {% endfor %}
 <p><em>Attach your profile photo when you paste these prompts.</em></p></div>
 
 {% if pack.srt_en %}
-<div class="card"><h2>10 · English captions (SRT) <button class="copy" data-t="srt">Copy</button></h2>
+<div class="card"><h2><span class="lbl">11 · English captions (SRT) <span class="info" data-tip="Optional cleaned caption file. Studio → Subtitles → Add → Upload file (with timing).">i</span></span> <button class="copy" data-t="srt">Copy</button></h2>
 <details><summary>Show SRT</summary><pre id="srt">{{ pack.srt_en }}</pre></details></div>
 {% endif %}
 
 {% if pack.localizations %}
-<div class="card"><h2>11 · Localized title &amp; description (25 languages)</h2>
+<div class="card"><h2><span class="lbl">12 · Localized title &amp; description (25 languages) <span class="info" data-tip="Paste each language into Studio → Details → Add language, to create a real indexed translation.">i</span></span></h2>
 <details><summary>Show all languages</summary>
 {% for code, loc in pack.localizations.items() %}
 <div class="locale"><strong>{{ code }}</strong> <button class="copy" data-t="loc{{ code }}">Copy</button>

@@ -65,11 +65,15 @@ async def build_pack(video_id: str, report=None) -> dict:
             extra_ms=int(delay * 1000) + 5000,
         )
 
+    # Free tier ships ONE thumbnail prompt; the paid tier gets 3 for A/B
+    # testing. One variable, flag-driven, so the count is instantly reversible.
+    n_thumbs = 3 if flag("paid_tier") else 1
     pack, usage = await llm.generate_json_with_usage(
         llm.PACK_PROMPT.format(
             title=meta.get("title", "(unknown)"),
             channel=meta.get("channel", "(unknown)"),
             transcript=transcript_text or "(no transcript available)",
+            n_thumbs=n_thumbs,
         ),
         on_retry=_on_retry,
     )
@@ -82,12 +86,22 @@ async def build_pack(video_id: str, report=None) -> dict:
     raw_chapters = pack.get("chapters") or []
     pack["chapters"] = yt.snap_chapters_to_segments(raw_chapters, segments)
     pack["chapters_estimated"] = not segments
+
+    # Defensive normalisation: hold the model to the shapes the artifact expects.
+    # Thumbnails are capped to the tier's count; cards/end_screen are always
+    # lists so the template can iterate them without a type guard.
+    thumbs = pack.get("thumbnail_prompts") or []
+    pack["thumbnail_prompts"] = thumbs[:n_thumbs] if isinstance(thumbs, list) else []
+    if not isinstance(pack.get("cards"), list):
+        pack["cards"] = []
+    if not isinstance(pack.get("end_screen"), list):
+        pack["end_screen"] = []
     report.done("llm")
 
     # Push the finished pieces one by one so the preview fills in live rather
     # than appearing all at once at the very end.
     for name in ("title", "description_hook", "hashtags", "pinned_comment",
-                 "chapters", "thumbnail_prompts"):
+                 "chapters", "thumbnail_prompts", "cards", "end_screen"):
         if pack.get(name):
             report.field(name, pack[name])
 

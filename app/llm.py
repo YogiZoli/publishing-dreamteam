@@ -173,16 +173,26 @@ Rules:
   TIMESTAMP RULE: the transcript above is prefixed with real timestamps in [m:ss] form. You MUST copy
   a timestamp VERBATIM from those brackets — pick the line where the topic actually changes. Never
   compute, round, average or invent a time. If (and only if) the transcript is empty, estimate at 130 wpm.
-- thumbnail_prompts: exactly 3 distinct prompts for an image AI. EACH must include verbatim:
+- thumbnail_prompts: exactly {n_thumbs} distinct prompt(s) for an image AI. EACH must include verbatim:
   "Use the attached profile photo as the main subject's face - preserve his exact likeness, do not
   alter facial features. The right side of the face faces forward and the right hand points to the left."
   Plus: 1280x720 16:9, bold 3-5 word overlay matching the title promise, high contrast, readable at
-  120x68 px, one focal point, and a concrete scene derived from this video's topic (different per prompt).
-- cards_endscreen: short manual instruction text for cards (at ~20% playlist card, ~70% latest-video card)
-  and end screens (subscribe + latest video).
+  120x68 px, one focal point, and a concrete scene derived from this video's topic (make each distinct
+  if more than one is requested).
+- cards: exactly 2 objects, each {{"time": "m:ss", "element": "Video|Playlist|Channel", "note": "..."}}.
+  Decide each card individually from THIS video's actual content — do NOT use a fixed template. Read the
+  transcript and pick the two specific moments where it is most natural to point the viewer to more of the
+  creator's own content, and explain in "note" why that moment fits. "note" MUST instruct the user to link
+  ONLY their own video / playlist / channel — this app cannot know their URLs, so never invent or suggest
+  any external or third-party link. "time" must be a real moment taken from the transcript timestamps.
+- end_screen: exactly 2 objects, each {{"time": "m:ss", "element": "Video|Playlist|Channel|Subscribe", "note": "..."}}.
+  Placed in the final 5-20 seconds of the video. Choose the two elements that best fit THIS video's ending
+  and call-to-action (again decided from the content, not a template). Any Video/Playlist/Channel element
+  refers to the user's OWN content only; never an external link.
 
 Return JSON with keys: title, description_hook, description_about, tags (array), hashtags (array),
-pinned_comment, chapters (array), thumbnail_prompts (array of 3), cards_endscreen."""
+pinned_comment, chapters (array), thumbnail_prompts (array of {n_thumbs}), cards (array of 2),
+end_screen (array of 2)."""
 
 
 LOCALIZE_PROMPT = """Translate this YouTube title and description hook into the {n} languages listed.
