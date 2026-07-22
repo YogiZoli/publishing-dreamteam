@@ -220,27 +220,62 @@ Raw lines:
 {lines}"""
 
 
+# Retry model for cleaned-SRT count mismatches (2026-07-23 live test finding).
+# The pinned pack model (gemini-3.5-flash-lite, no thinking) failed to hold an
+# exact 1:1 line count on 2/2 live tests (72-line transcript -> 40, then 69
+# lines back) -- it is fast for the pack but not reliable at this rigid a
+# task. Rather than re-pin GEMINI_MODEL globally (which would undo the
+# Session 6 latency win for every pack, not just this one paid-tier field),
+# retry ONCE with a distinct, explicitly-versioned "thinking" model that holds
+# instructions more reliably. Never a *-latest alias -- see the fallback-chain
+# note above for why that already bit this project twice. Overridable via env
+# so a future model retirement is a Railway var edit, not a redeploy.
+CLEAN_SRT_RETRY_MODEL = os.getenv("CLEAN_SRT_RETRY_MODEL", "gemini-3.6-flash")
+
+
 async def generate_cleaned_captions(texts: list[str]) -> list[str]:
     """LLM-clean a list of caption texts, preserving order and count.
 
     The timing (start/dur) is handled by the caller and never touched here — we
-    only rewrite text. Returns a list of the SAME length as ``texts``; raises
-    LLMError if the model returns a different count so the caller can fall back
-    to the raw SRT rather than shipping misaligned captions.
+    only rewrite text. Returns a list of the SAME length as ``texts``. Tries the
+    default pinned model first; on a count mismatch (not a network/HTTP error --
+    the call succeeded, the shape is just wrong) retries once against
+    CLEAN_SRT_RETRY_MODEL before giving up. Raises LLMError only if BOTH
+    attempts mismatch, so the caller can fall back to the raw SRT rather than
+    shipping misaligned captions.
     """
     if not texts:
         return []
     payload = json.dumps(texts, ensure_ascii=False)
-    data, _usage = await generate_json_with_usage(
-        CLEAN_SRT_PROMPT.format(n=len(texts), lines=payload)
+    prompt = CLEAN_SRT_PROMPT.format(n=len(texts), lines=payload)
+
+    def _extract(data: dict) -> list[str] | None:
+        lines = data.get("lines")
+        if isinstance(lines, list) and len(lines) == len(texts):
+            return [str(x) for x in lines]
+        return None
+
+    data, _usage = await generate_json_with_usage(prompt)
+    lines = _extract(data)
+    if lines is not None:
+        return lines
+
+    got = data.get("lines")
+    log.warning(
+        "cleaned caption count mismatch on primary model: got %s, expected %d "
+        "— retrying once with %s",
+        len(got) if isinstance(got, list) else "n/a", len(texts), CLEAN_SRT_RETRY_MODEL,
     )
-    lines = data.get("lines")
-    if not isinstance(lines, list) or len(lines) != len(texts):
-        raise LLMError(
-            f"cleaned caption count mismatch: got {len(lines) if isinstance(lines, list) else 'n/a'}, "
-            f"expected {len(texts)}"
-        )
-    return [str(x) for x in lines]
+    data2, _usage2 = await generate_json_with_usage(prompt, model=CLEAN_SRT_RETRY_MODEL)
+    lines = _extract(data2)
+    if lines is not None:
+        return lines
+
+    got2 = data2.get("lines")
+    raise LLMError(
+        f"cleaned caption count mismatch on both models (primary + {CLEAN_SRT_RETRY_MODEL}): "
+        f"got {len(got2) if isinstance(got2, list) else 'n/a'}, expected {len(texts)}"
+    )
 
 
 LOCALIZE_PROMPT = """Translate this YouTube title and description into ALL {n} languages listed — no omissions.
