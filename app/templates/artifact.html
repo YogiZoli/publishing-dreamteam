@@ -296,6 +296,15 @@ document.querySelectorAll('button.copy').forEach(btn=>{
    if(okFields.length){
     btn.textContent='✓ Published ('+elapsed.toFixed(1)+'s)';btn.classList.add('done');btn.disabled=true;
     okFields.forEach(f=>greenField(f,btn));   // green the matching per-field Upload buttons
+    // Bulk localizations / translated captions cover EVERY language, so green
+    // all the per-language Upload buttons too (translated tracks are still
+    // finishing in the background — nothing more for the user to press).
+    if(okFields.indexOf('localizations')>=0||okFields.indexOf('translated_captions')>=0){
+     document.querySelectorAll('button.upload').forEach(b=>{
+      if(b!==btn&&b.dataset.field&&b.dataset.field.indexOf('loc:')===0){
+       b.textContent='✓ Published';b.classList.add('done');b.disabled=true;}
+     });
+    }
     celebrate(okFields.reduce((a,f)=>a+savedFor(f),0),elapsed);
    }else{
     btn.textContent='✗ Failed — retry';btn.disabled=false;            // let them try again
@@ -318,7 +327,10 @@ document.querySelectorAll('button.copy').forEach(btn=>{
     if(!confirm('Publish '+labelFor(field)+' to your YouTube video now?'))return;
     run(b,[field]);
    });
-   cp.parentNode.appendChild(b);
+   // Insert right AFTER the Copy button so Copy + Upload sit on the same line
+   // (for the per-language rows, appending to the parent dropped it below the
+   // text box).
+   cp.insertAdjacentElement('afterend',b);
   });
  }
 
