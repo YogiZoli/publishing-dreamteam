@@ -108,6 +108,25 @@ async def app_home(request: Request):
     )
 
 
+@app.get("/paid")
+async def paid_account(request: Request):
+    """Standalone account page: paid-feature status + YouTube connect/disconnect,
+    reachable without first building a pack."""
+    if not request.session.get("user_id"):
+        return RedirectResponse("/")
+    return templates.TemplateResponse(
+        request=request,
+        name="paid.html",
+        context={
+            "email": request.session.get("email", ""),
+            "paid_tier": flag("paid_tier"),
+            "yt_write_path": flag("yt_write_path"),
+            "localization": flag("localization"),
+            "srt_output": flag("srt_output"),
+        },
+    )
+
+
 @app.post("/artifact")
 async def create_artifact(request: Request, video_url: str = Form(...)):
     """Kick off a build and return immediately with a job id.

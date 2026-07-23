@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Account &amp; YouTube — Dream Team</title>
+<style>
+ body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#f7f7f8;color:#1d1d1f;max-width:720px;margin:0 auto;padding:50px 24px}
+ .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:34px;font-size:.9rem}
+ .top a{color:#888}
+ h1{font-size:1.5rem;margin:0 0 22px}
+ .card{background:#fff;border:1px solid #e6e6ea;border-radius:12px;padding:22px;margin-bottom:18px}
+ .card h2{font-size:1.05rem;margin:0 0 12px}
+ .row{display:flex;justify-content:space-between;align-items:center;padding:7px 0;font-size:.92rem;border-bottom:1px solid #f4f4f6}
+ .row:last-child{border-bottom:0}
+ .pill{font-size:.78rem;border-radius:99px;padding:3px 12px;font-weight:700}
+ .on{background:#e7f6ec;color:#1c7c40}
+ .off{background:#f1f1f3;color:#999}
+ button{border:0;border-radius:8px;padding:11px 20px;font-size:.9rem;font-weight:700;cursor:pointer}
+ .connect{background:#c00;color:#fff}
+ .disconnect{background:#e5e5e5;color:#1d1d1f;font-weight:400}
+ button:disabled{opacity:.55;cursor:not-allowed}
+ .muted{color:#888;font-size:.86rem;line-height:1.5}
+ .status{font-size:.95rem;margin:6px 0 14px}
+ .status b{color:#1c7c40}
+</style>
+</head>
+<body>
+<div class="top">
+  <span>Signed in as {{ email }}</span>
+  <span><a href="/app">← Create a pack</a> &nbsp;·&nbsp; <a href="/auth/google/logout">Sign out</a></span>
+</div>
+
+<h1>Account &amp; YouTube</h1>
+
+<div class="card">
+  <h2>Your plan</h2>
+  <div class="row"><span>Paid features</span><span class="pill {{ 'on' if paid_tier else 'off' }}">{{ 'ON' if paid_tier else 'OFF' }}</span></div>
+  <div class="row"><span>One-click Publish to YouTube</span><span class="pill {{ 'on' if yt_write_path else 'off' }}">{{ 'ON' if yt_write_path else 'OFF' }}</span></div>
+  <div class="row"><span>25-language localization</span><span class="pill {{ 'on' if localization else 'off' }}">{{ 'ON' if localization else 'OFF' }}</span></div>
+  <div class="row"><span>Cleaned SRT captions</span><span class="pill {{ 'on' if srt_output else 'off' }}">{{ 'ON' if srt_output else 'OFF' }}</span></div>
+  <p class="muted" style="margin-top:12px">These are the paid features currently enabled on your account.</p>
+</div>
+
+<div class="card">
+  <h2>🚀 YouTube channel</h2>
+  {% if paid_tier and yt_write_path %}
+    <div class="status" id="ytStatus">Checking connection…</div>
+    <div id="ytActions"></div>
+    <p class="muted">Connecting lets the app publish a pack straight onto your own video (Approval Mode — you always confirm first). Disconnecting removes the app's stored access token. To fully revoke on Google's side, visit your Google Account → Security → Third-party access.</p>
+  {% else %}
+    <p class="muted">One-click YouTube publishing is a paid-tier feature and is not enabled on your account.</p>
+  {% endif %}
+</div>
+
+{% if paid_tier and yt_write_path %}
+<script>
+(function(){
+ const st=document.getElementById('ytStatus'), act=document.getElementById('ytActions');
+ async function load(){
+  try{
+   const r=await fetch('/yt/status',{credentials:'same-origin'});
+   const d=await r.json();
+   if(!d.available){st.textContent='Not available on this account.';return;}
+   if(d.connected){
+    st.innerHTML='Connected as <b>'+(d.channel_title||'your channel')+'</b>.';
+    act.innerHTML='<button class="disconnect" id="dc">Disconnect</button>';
+    document.getElementById('dc').addEventListener('click',async()=>{
+     if(!confirm('Disconnect your YouTube channel from this app?'))return;
+     await fetch('/yt/disconnect',{method:'POST',credentials:'same-origin'});load();
+    });
+   }else{
+    st.textContent='No YouTube channel connected yet.';
+    act.innerHTML='<button class="connect" id="cn">Connect YouTube channel</button>';
+    document.getElementById('cn').addEventListener('click',()=>{location.href='/yt/connect?return_to=/paid';});
+   }
+  }catch(e){st.textContent='Could not load connection status.';}
+ }
+ load();
+})();
+</script>
+{% endif %}
+</body>
+</html>
