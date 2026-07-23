@@ -109,7 +109,30 @@ async def _load_credentials(user_id: str) -> dict | None:
     }
 
 
+GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+
+
 async def disconnect(user_id: str) -> None:
+    """Remove the stored token AND revoke the grant on Google's side, so the
+    next connect shows a fresh consent (scopes not pre-granted). Revoking the
+    refresh token tears down the whole OAuth grant for this client — the
+    equivalent of the user removing the app under Google Account → Third-party
+    access, but done automatically so the user never has to go there between
+    tests. Best-effort: a failed revoke still deletes our local token."""
+    creds = await _load_credentials(user_id)
+    if creds and creds.get("refresh_token"):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    GOOGLE_REVOKE_URL,
+                    data={"token": creds["refresh_token"]},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+            # 200 = revoked; 400 = already invalid/expired (also fine).
+            if r.status_code not in (200, 400):
+                log.warning("google revoke returned %s: %s", r.status_code, r.text[:160])
+        except Exception as e:  # noqa: BLE001 — never let revoke block disconnect
+            log.warning("google revoke failed for user=%s: %s", user_id, e)
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM yt_credentials WHERE user_id=$1", user_id)

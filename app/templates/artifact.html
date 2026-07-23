@@ -189,12 +189,21 @@ document.querySelectorAll('button.copy').forEach(btn=>{
  const bar=document.getElementById('ytbar');
  const FIELD_BY_COPY={title:'title',desc:'description',tags:'tags',srt:'captions'};
  const LABEL={title:'Title',description:'Description',tags:'Tags',localizations:'Localizations',captions:'Captions (EN)',translated_captions:'Translated captions (25 langs)'};
- // Rough minutes this field would take to do BY HAND (anchored to the ROI doc:
- // a full 25-language pack by hand ≈ 3–5+ hrs, single-language paste ≈ minutes).
- const SAVE_MIN={title:3,description:8,tags:5,localizations:180,captions:15,translated_captions:300};
+ // Realistic minutes each field takes to do BY HAND (deliberately conservative
+ // so the saved-time claim is credible — pasting one localization is seconds,
+ // 25 of them adds up, but nothing here is "hours").
+ const SAVE_MIN={title:1,description:2,tags:2,localizations:12,captions:4,translated_captions:20};
+ // Rough SECONDS each field adds to the publish, for the up-front estimate.
+ // Translated captions dominate (one LLM translation per language).
+ const EST_SEC={title:1,description:1,tags:1,localizations:2,captions:4,translated_captions:95};
 
- function fmt(min){min=Math.round(min);if(min<60)return '~'+min+' min';
+ function fmt(min){min=Math.round(min);if(min<1)return '~1 min';if(min<60)return '~'+min+' min';
   const h=Math.floor(min/60),m=min%60;return '~'+h+' hr'+(m?' '+m+' min':'');}
+ function estimateSec(fields){
+  let meta=0,s=0;
+  fields.forEach(f=>{ if(['title','description','tags','localizations'].includes(f)) meta=Math.max(meta,EST_SEC[f]); else s+=(EST_SEC[f]||1); });
+  return Math.max(meta+s,2);
+ }
 
  async function post(fields){
   const r=await fetch('/yt/publish',{method:'POST',credentials:'same-origin',
@@ -239,26 +248,53 @@ document.querySelectorAll('button.copy').forEach(btn=>{
  const mc=document.getElementById('ytModalClose');
  if(mc)mc.addEventListener('click',()=>{document.getElementById('ytModalWrap').style.display='none';});
 
+ // Every publish/upload control, so they can all be locked during a run.
+ function actionButtons(){
+  return [...document.querySelectorAll('button.upload'), document.getElementById('ytPublishAll')].filter(Boolean);
+ }
+ // A published field's own per-field Upload button turns green + disabled so the
+ // user sees it is already on the video and does not re-upload it.
+ function greenField(field,except){
+  document.querySelectorAll('button.upload').forEach(b=>{
+   if(b===except)return;
+   if(b.dataset.field===field){b.textContent='✓ Published';b.classList.add('done');b.disabled=true;}
+  });
+ }
+
  // ---- shared publish runner (Publish All + per-field) ---------------
  async function run(btn,fields){
   if(btn.disabled)return;                       // guard against double-press
-  btn.disabled=true;const base=btn.dataset.base||btn.textContent;btn.dataset.base=base;
+  const base=btn.dataset.base||btn.textContent;btn.dataset.base=base;
+  // Lock EVERY publish/upload control for the whole run (not just this button).
+  actionButtons().forEach(b=>{if(!b.classList.contains('done'))b.disabled=true;});
+  btn.disabled=true;
+  const est=estimateSec(fields);
   const t0=Date.now();
-  const tick=setInterval(()=>{btn.textContent='Publishing… '+((Date.now()-t0)/1000|0)+'s';},250);
+  const tick=setInterval(()=>{
+   const el=(Date.now()-t0)/1000;
+   const left=Math.max(0,Math.ceil(est-el));
+   const pct=Math.min(96,Math.round(el/est*100));
+   btn.textContent = left>0 ? ('Publishing… ~'+left+'s left ('+pct+'%)') : 'Publishing… almost done';
+  },250);
   try{
    const res=await post(fields);
    clearInterval(tick);
    const elapsed=(Date.now()-t0)/1000;
    renderResults(res);
    const okFields=Object.keys(res).filter(k=>res[k].ok);
+   // Re-enable controls first, then apply the terminal states.
+   actionButtons().forEach(b=>{if(!b.classList.contains('done'))b.disabled=false;});
    if(okFields.length){
-    btn.textContent='✓ Published ('+elapsed.toFixed(1)+'s)';btn.classList.add('done'); // stays disabled + green
+    btn.textContent='✓ Published ('+elapsed.toFixed(1)+'s)';btn.classList.add('done');btn.disabled=true;
+    okFields.forEach(f=>greenField(f,btn));   // green the matching per-field Upload buttons
     celebrate(okFields.reduce((a,f)=>a+(SAVE_MIN[f]||0),0),elapsed);
    }else{
     btn.textContent='✗ Failed — retry';btn.disabled=false;            // let them try again
    }
   }catch(e){
-   clearInterval(tick);btn.textContent=base;btn.disabled=false;alert(e.message);
+   clearInterval(tick);
+   actionButtons().forEach(b=>{if(!b.classList.contains('done'))b.disabled=false;});
+   btn.textContent=base;btn.disabled=false;alert(e.message);
   }
  }
 
@@ -266,7 +302,7 @@ document.querySelectorAll('button.copy').forEach(btn=>{
   document.querySelectorAll('button.copy').forEach(cp=>{
    const field=FIELD_BY_COPY[cp.dataset.t];if(!field)return;
    if(cp.parentNode.querySelector('.upload'))return;
-   const b=document.createElement('button');b.className='upload';b.textContent='Upload';
+   const b=document.createElement('button');b.className='upload';b.textContent='Upload';b.dataset.field=field;
    b.title='Write just this field to your video';
    b.addEventListener('click',()=>{
     if(b.disabled)return;
