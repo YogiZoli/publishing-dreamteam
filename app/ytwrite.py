@@ -22,6 +22,8 @@ import json
 import logging
 import secrets
 
+import asyncio
+
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, HTTPException, Request
@@ -419,12 +421,36 @@ async def _publish_fields(user_id: str, pack: dict, fields: list[str]) -> dict:
         if wants_caps:
             results["captions"] = await _insert_caption(client, access_token, video_id, pack)
 
-        if "translated_captions" in fields:
-            results["translated_captions"] = await _insert_translated_captions(
-                client, access_token, video_id, pack
-            )
+    # Translated captions run in the BACKGROUND. On a long video, translating
+    # into 25 languages is MINUTES of LLM work (each call can take ~60s+ on the
+    # strong model, plus Gemini 503 backoffs) — far longer than Railway's edge
+    # proxy will hold a request open, so doing it inline 502'd the whole publish.
+    # Schedule it and return immediately; the tracks appear on the video over the
+    # next few minutes. Runs after the sync writes so metadata/localizations are
+    # already saved by the time the pack returns.
+    if "translated_captions" in fields:
+        asyncio.create_task(_translated_captions_job(user_id, pack))
+        results["translated_captions"] = {
+            "ok": True,
+            "message": "Processing in the background — the language caption tracks appear on your video over the next few minutes.",
+        }
 
     return results
+
+
+async def _translated_captions_job(user_id: str, pack: dict) -> None:
+    """Fire-and-forget worker for translated caption tracks. Mints its own token
+    and client so it survives after /yt/publish has already returned (the request
+    cannot stay open for the minutes this takes). Best-effort — a redeploy mid-run
+    just drops it, same contract as the chapter backfill."""
+    video_id = pack.get("video_id")
+    try:
+        access_token, _creds = await _access_token(user_id)
+        async with httpx.AsyncClient(timeout=90) as client:
+            res = await _insert_translated_captions(client, access_token, video_id, pack)
+        log.info("translated captions (bg) video=%s: %s", video_id, res.get("message"))
+    except Exception as e:  # noqa: BLE001 — background task must swallow everything
+        log.warning("translated captions (bg) failed video=%s: %s", video_id, e)
 
 
 # Human-readable names for the caption translation prompt (codes match engine.LOCALES).

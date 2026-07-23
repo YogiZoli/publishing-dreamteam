@@ -288,12 +288,14 @@ Lines:
 {lines}"""
 
 
-# Caption TRANSLATION runs on a stronger "thinking" model by default, not the
-# fast lite pack model: holding an EXACT 1:1 line count across a translation is
-# the same rigid-count task that the lite model slipped on for cleaned SRT, and
-# it slips more often per-language on translation. gemini-3.6-flash holds it far
-# better. Env-overridable; never a *-latest alias (see the fallback-chain note).
-TRANSLATE_CAPTIONS_MODEL = os.getenv("TRANSLATE_CAPTIONS_MODEL", "gemini-3.6-flash")
+# Caption TRANSLATION runs on the FAST lite model. It was briefly switched to a
+# "thinking" model to fix count slips, but that model spent ~15k thinking tokens
+# and ~60s+ PER language — so on a 10-min video the 25-language loop ran for many
+# minutes and Railway's edge 502'd the publish. The real fix is two-fold: the
+# caller runs this in the BACKGROUND (no request timeout), and count slips are
+# COERCED (below) instead of skipping the language — so a fast model is fine and
+# far cheaper. Env-overridable; never a *-latest alias (see the fallback note).
+TRANSLATE_CAPTIONS_MODEL = os.getenv("TRANSLATE_CAPTIONS_MODEL", "gemini-3.5-flash-lite")
 
 
 async def generate_translated_captions(
@@ -301,30 +303,37 @@ async def generate_translated_captions(
 ) -> list[str]:
     """Translate caption texts into one language, preserving order and count.
 
-    Timing is the caller's job — this only rewrites text, 1:1 with the input, so
-    the existing start/dur are reused verbatim for the translated SRT. Runs on
-    the stronger TRANSLATE_CAPTIONS_MODEL and re-rolls it TWICE on a count
-    mismatch (the call succeeded, the shape is just wrong — a fresh roll usually
-    lands), then raises so the caller can skip that one language rather than
-    upload a misaligned track."""
+    Timing is the caller's job — this only rewrites text, so the existing
+    start/dur are reused for the translated SRT. Re-rolls twice for an exact 1:1
+    count; if the model still slips (common on long transcripts), it COERCES the
+    best translation to the exact length — truncating extra lines or padding the
+    tail with empties — rather than skipping the whole language. A boundary or
+    two may drift, acceptable for a secondary caption track. Only a total failure
+    (no lines at all / network) raises."""
     if not texts:
         return []
     model = model or TRANSLATE_CAPTIONS_MODEL
+    n = len(texts)
     payload = json.dumps(texts, ensure_ascii=False)
-    prompt = TRANSLATE_SRT_PROMPT.format(lang=lang_name, n=len(texts), lines=payload)
+    prompt = TRANSLATE_SRT_PROMPT.format(lang=lang_name, n=n, lines=payload)
 
-    def _extract(data: dict) -> list[str] | None:
-        lines = data.get("lines")
-        if isinstance(lines, list) and len(lines) == len(texts):
-            return [str(x) for x in lines]
-        return None
+    def _lines(data: dict) -> list[str] | None:
+        raw = data.get("lines")
+        return [str(x) for x in raw] if isinstance(raw, list) and raw else None
 
+    best: list[str] | None = None
     for _attempt in range(2):
         data, _u = await generate_json_with_usage(prompt, model=model)
-        lines = _extract(data)
-        if lines is not None:
-            return lines
-    raise LLMError(f"translated caption count mismatch for {lang_name}")
+        got = _lines(data)
+        if got is None:
+            continue
+        if len(got) == n:
+            return got
+        best = got  # keep the closest usable translation
+    if best is not None:
+        log.warning("translated caption coerced to length for %s (%d→%d)", lang_name, len(best), n)
+        return best[:n] if len(best) >= n else best + [""] * (n - len(best))
+    raise LLMError(f"translated caption produced no lines for {lang_name}")
 
 
 LOCALIZE_PROMPT = """Translate this YouTube title and description into ALL {n} languages listed — no omissions.

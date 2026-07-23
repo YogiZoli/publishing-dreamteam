@@ -194,8 +194,9 @@ document.querySelectorAll('button.copy').forEach(btn=>{
  // 25 of them adds up, but nothing here is "hours").
  const SAVE_MIN={title:1,description:2,tags:2,localizations:12,captions:4,translated_captions:20};
  // Rough SECONDS each field adds to the publish, for the up-front estimate.
- // Translated captions dominate (one LLM translation per language).
- const EST_SEC={title:1,description:1,tags:1,localizations:2,captions:4,translated_captions:95};
+ // translated_captions now runs server-side in the BACKGROUND, so it barely
+ // adds to the request time (it returns immediately with a "processing" note).
+ const EST_SEC={title:1,description:1,tags:1,localizations:2,captions:4,translated_captions:2};
 
  function fmt(min){min=Math.round(min);if(min<1)return '~1 min';if(min<60)return '~'+min+' min';
   const h=Math.floor(min/60),m=min%60;return '~'+h+' hr'+(m?' '+m+' min':'');}
