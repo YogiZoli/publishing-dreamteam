@@ -278,6 +278,47 @@ async def generate_cleaned_captions(texts: list[str]) -> list[str]:
     )
 
 
+TRANSLATE_SRT_PROMPT = """Translate this JSON array of YouTube caption lines into {lang}.
+Return STRICT JSON: an object {{"lines": [...]}} whose "lines" array has EXACTLY {n} strings,
+one per input line, in the SAME ORDER. Translate naturally and idiomatically (not word-for-word).
+DO NOT merge, split, reorder, add or drop lines — the count MUST stay {n}. If an input line is
+only filler, return it as an empty string "" (keep the slot).
+
+Lines:
+{lines}"""
+
+
+async def generate_translated_captions(texts: list[str], lang_name: str) -> list[str]:
+    """Translate caption texts into one language, preserving order and count.
+
+    Timing is the caller's job — this only rewrites text, 1:1 with the input, so
+    the existing start/dur are reused verbatim for the translated SRT. Same
+    two-model reliability pattern as generate_cleaned_captions: a count mismatch
+    (call succeeded, shape wrong) retries once against CLEAN_SRT_RETRY_MODEL
+    before raising, so the caller can skip that one language rather than upload a
+    misaligned track."""
+    if not texts:
+        return []
+    payload = json.dumps(texts, ensure_ascii=False)
+    prompt = TRANSLATE_SRT_PROMPT.format(lang=lang_name, n=len(texts), lines=payload)
+
+    def _extract(data: dict) -> list[str] | None:
+        lines = data.get("lines")
+        if isinstance(lines, list) and len(lines) == len(texts):
+            return [str(x) for x in lines]
+        return None
+
+    data, _u = await generate_json_with_usage(prompt)
+    lines = _extract(data)
+    if lines is not None:
+        return lines
+    data2, _u2 = await generate_json_with_usage(prompt, model=CLEAN_SRT_RETRY_MODEL)
+    lines = _extract(data2)
+    if lines is not None:
+        return lines
+    raise LLMError(f"translated caption count mismatch for {lang_name}")
+
+
 LOCALIZE_PROMPT = """Translate this YouTube title and description into ALL {n} languages listed — no omissions.
 Title max 100 chars per language; keep the primary keyword. Translate the description in full (all
 paragraphs), natural and idiomatic, not word-for-word. Return STRICT JSON: an object keyed by the

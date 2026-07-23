@@ -67,7 +67,8 @@
     <label><input type="checkbox" class="ytf" value="description" checked> Description (chapters + hashtags included)</label>
     <label><input type="checkbox" class="ytf" value="tags" checked> Tags</label>
     {% if pack.localizations %}<label><input type="checkbox" class="ytf" value="localizations"> Localizations (25 languages)</label>{% endif %}
-    {% if pack.srt_en %}<label><input type="checkbox" class="ytf" value="captions"> Captions (cleaned SRT)</label>{% endif %}
+    {% if pack.srt_en %}<label><input type="checkbox" class="ytf" value="captions"> Captions — English (cleaned SRT)</label>{% endif %}
+    {% if pack.localizations and pack.transcript_segments %}<label><input type="checkbox" class="ytf" value="translated_captions"> Translated captions (25 languages · slower, ~1–2 min)</label>{% endif %}
     <div class="row">
       <button class="pub" id="ytPublishAll">Publish All checked →</button>
       <button class="pub ghost" id="ytDisconnect">Disconnect</button>
@@ -187,10 +188,10 @@ document.querySelectorAll('button.copy').forEach(btn=>{
  const AID={{ artifact_id | tojson }};
  const bar=document.getElementById('ytbar');
  const FIELD_BY_COPY={title:'title',desc:'description',tags:'tags',srt:'captions'};
- const LABEL={title:'Title',description:'Description',tags:'Tags',localizations:'Localizations',captions:'Captions'};
+ const LABEL={title:'Title',description:'Description',tags:'Tags',localizations:'Localizations',captions:'Captions (EN)',translated_captions:'Translated captions (25 langs)'};
  // Rough minutes this field would take to do BY HAND (anchored to the ROI doc:
  // a full 25-language pack by hand ≈ 3–5+ hrs, single-language paste ≈ minutes).
- const SAVE_MIN={title:3,description:8,tags:5,localizations:180,captions:15};
+ const SAVE_MIN={title:3,description:8,tags:5,localizations:180,captions:15,translated_captions:300};
 
  function fmt(min){min=Math.round(min);if(min<60)return '~'+min+' min';
   const h=Math.floor(min/60),m=min%60;return '~'+h+' hr'+(m?' '+m+' min':'');}

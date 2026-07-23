@@ -372,30 +372,33 @@ async def _publish_fields(user_id: str, pack: dict, fields: list[str]) -> dict:
         if wants_caps:
             results["captions"] = await _insert_caption(client, access_token, video_id, pack)
 
+        if "translated_captions" in fields:
+            results["translated_captions"] = await _insert_translated_captions(
+                client, access_token, video_id, pack
+            )
+
     return results
 
 
-async def _insert_caption(
-    client: httpx.AsyncClient, access_token: str, video_id: str, pack: dict
-) -> dict:
-    """captions.insert — upload the cleaned SRT as a real caption track.
+# Human-readable names for the caption translation prompt (codes match engine.LOCALES).
+LANG_NAMES = {
+    "hu": "Hungarian", "de": "German", "fr": "French", "es": "Spanish", "pt": "Portuguese",
+    "it": "Italian", "nl": "Dutch", "pl": "Polish", "ro": "Romanian", "cs": "Czech",
+    "sk": "Slovak", "hr": "Croatian", "sr": "Serbian", "bg": "Bulgarian", "el": "Greek",
+    "tr": "Turkish", "ru": "Russian", "uk": "Ukrainian", "ar": "Arabic", "hi": "Hindi",
+    "id": "Indonesian", "vi": "Vietnamese", "th": "Thai", "ja": "Japanese", "ko": "Korean",
+}
 
-    Uses a hand-built multipart/related body (metadata JSON + the SRT bytes).
-    A track for the same language may already exist (409) — reported, not
-    fatal, so the metadata write is never rolled back by a caption clash.
-    """
-    srt = (pack.get("srt_en") or "").strip()
-    if not srt:
-        return {"ok": False, "message": "No caption file in this pack (paid SRT feature off?)"}
+
+async def _upload_caption(
+    client: httpx.AsyncClient, access_token: str, video_id: str,
+    srt: str, language: str, name: str,
+) -> dict:
+    """Low-level captions.insert for ONE language via a hand-built
+    multipart/related body (metadata JSON + SRT bytes). 409 = a track for that
+    language already exists — reported, not fatal."""
     boundary = "----dreamteam" + secrets.token_hex(12)
-    meta = {
-        "snippet": {
-            "videoId": video_id,
-            "language": "en",
-            "name": "English (cleaned)",
-            "isDraft": False,
-        }
-    }
+    meta = {"snippet": {"videoId": video_id, "language": language, "name": name, "isDraft": False}}
     body = (
         f"--{boundary}\r\n"
         "Content-Type: application/json; charset=UTF-8\r\n\r\n"
@@ -403,7 +406,6 @@ async def _insert_caption(
         f"--{boundary}\r\n"
         "Content-Type: application/octet-stream\r\n\r\n"
     ).encode() + srt.encode("utf-8") + f"\r\n--{boundary}--\r\n".encode()
-
     r = await client.post(
         f"{YT_UPLOAD}/captions",
         params={"part": "snippet", "uploadType": "multipart"},
@@ -414,14 +416,69 @@ async def _insert_caption(
         content=body,
     )
     if r.status_code in (200, 201):
-        return {"ok": True, "message": "Caption track uploaded"}
+        return {"ok": True, "message": "uploaded"}
     if r.status_code == 409:
+        return {"ok": False, "message": f"a {language} caption track already exists"}
+    log.warning("captions.insert %s failed %s: %s", language, r.status_code, r.text[:200])
+    return {"ok": False, "message": f"failed ({r.status_code})"}
+
+
+async def _insert_caption(
+    client: httpx.AsyncClient, access_token: str, video_id: str, pack: dict
+) -> dict:
+    """The English cleaned-SRT track (the 'captions' publish field)."""
+    srt = (pack.get("srt_en") or "").strip()
+    if not srt:
+        return {"ok": False, "message": "No caption file in this pack (paid SRT feature off?)"}
+    res = await _upload_caption(client, access_token, video_id, srt, "en", "English (cleaned)")
+    if res["ok"]:
+        return {"ok": True, "message": "Caption track uploaded"}
+    if "already exists" in res["message"]:
         return {"ok": False, "message": "An English caption track already exists on this video"}
-    log.warning("captions.insert failed %s: %s", r.status_code, r.text[:200])
-    return {"ok": False, "message": f"Failed ({r.status_code}): {r.text[:160]}"}
+    return {"ok": False, "message": res["message"]}
 
 
-ALLOWED_FIELDS = {"title", "description", "tags", "localizations", "captions"}
+async def _insert_translated_captions(
+    client: httpx.AsyncClient, access_token: str, video_id: str, pack: dict
+) -> dict:
+    """Translate the transcript into every localization language and upload one
+    caption track per language. Each language is independent — a translation or
+    upload failure skips that language and never blocks the rest. SLOW by nature
+    (one LLM translation call per language), so it is its own opt-in field."""
+    from app import llm, yt
+
+    segments = pack.get("transcript_segments") or []
+    if not segments:
+        return {"ok": False, "message": "No transcript available to translate into captions"}
+    codes = list((pack.get("localizations") or {}).keys()) or list(LANG_NAMES.keys())
+    texts = [s["text"] for s in segments]
+    ok = 0
+    fails: list[str] = []
+    for code in codes:
+        name = LANG_NAMES.get(code, code)
+        try:
+            translated = await llm.generate_translated_captions(texts, name)
+            tsegs = [{**s, "text": (t or "").strip()} for s, t in zip(segments, translated)]
+            tsegs = [s for s in tsegs if s["text"]]
+            if not tsegs:
+                fails.append(code)
+                continue
+            srt = yt.transcript_to_srt(tsegs)
+            res = await _upload_caption(client, access_token, video_id, srt, code, f"{name} (auto)")
+            if res["ok"]:
+                ok += 1
+            else:
+                fails.append(code)
+        except Exception as e:  # noqa: BLE001 — one language must never break the rest
+            log.warning("translated caption failed lang=%s: %s", code, str(e)[:160])
+            fails.append(code)
+    msg = f"{ok}/{len(codes)} language tracks uploaded"
+    if fails:
+        msg += f" (skipped: {', '.join(fails)})"
+    return {"ok": ok > 0, "message": msg}
+
+
+ALLOWED_FIELDS = {"title", "description", "tags", "localizations", "captions", "translated_captions"}
 
 
 @router.post("/yt/publish")
