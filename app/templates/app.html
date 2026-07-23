@@ -120,10 +120,18 @@
     clearInterval(ticker);
     ticker = setInterval(function () {
       const left = Math.max(0, Math.round((etaDeadline - Date.now()) / 1000));
-      etaEl.textContent = left > 0 ? ('about ' + left + 's remaining') : 'almost there…';
-      // Creep the bar forward between server events so it never looks frozen
-      // during the long single LLM call — capped so it cannot overtake reality.
-      const cap = Math.min(shownPct + 4, 96);
+      if (left > 0) {
+        etaEl.textContent = 'about ' + left + 's remaining';
+      } else {
+        // Past the estimate (e.g. a long cleaned-SRT step on a big video) —
+        // keep counting UP so the user sees it is still moving, not frozen.
+        const over = Math.round((Date.now() - etaDeadline) / 1000);
+        etaEl.textContent = 'finishing up… (' + over + 's)';
+      }
+      // Creep the bar forward so it never looks frozen during the long single
+      // LLM call. Cap at 96 while within the estimate, then edge to 99 once
+      // over — 100% is reserved for the real 'done' event.
+      const cap = left > 0 ? Math.min(shownPct + 4, 96) : 99;
       if (shownPct < cap && shownPct > 0) setPct(shownPct + 1);
     }, 1000);
   }

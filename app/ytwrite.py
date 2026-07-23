@@ -405,7 +405,7 @@ async def _publish_fields(user_id: str, pack: dict, fields: list[str]) -> dict:
                 json=body,
             )
             ok = r.status_code == 200
-            msg = "Updated" if ok else f"Failed ({r.status_code}): {r.text[:160]}"
+            msg = "Updated" if ok else _friendly_api_error(r.status_code, r.text)
             for f in meta_fields:
                 results[f] = {"ok": ok, "message": msg}
             if wants_loc_all:
@@ -463,6 +463,22 @@ LANG_NAMES = {
 }
 
 
+def _friendly_api_error(status: int, text: str) -> str:
+    """Turn a raw YouTube API error into something a user can act on."""
+    low = (text or "").lower()
+    if status == 403 and "quota" in low:
+        return ("YouTube's daily API quota for this app is used up (it resets at "
+                "midnight US-Pacific). Uploading caption tracks is the biggest "
+                "quota cost — a full 25-language translated-caption run alone uses "
+                "most of a day's quota. Try again after the reset, or publish "
+                "metadata only / fewer caption languages.")
+    if status == 401:
+        return "YouTube authorization expired — please reconnect your channel."
+    if status == 403:
+        return "YouTube refused the write (403) — check the video belongs to the connected channel."
+    return f"Failed ({status})"
+
+
 async def _upload_caption(
     client: httpx.AsyncClient, access_token: str, video_id: str,
     srt: str, language: str, name: str,
@@ -493,7 +509,7 @@ async def _upload_caption(
     if r.status_code == 409:
         return {"ok": False, "message": f"a {language} caption track already exists"}
     log.warning("captions.insert %s failed %s: %s", language, r.status_code, r.text[:200])
-    return {"ok": False, "message": f"failed ({r.status_code})"}
+    return {"ok": False, "message": _friendly_api_error(r.status_code, r.text)}
 
 
 async def _insert_caption(

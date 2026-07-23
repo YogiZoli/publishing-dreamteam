@@ -68,7 +68,7 @@
     <label><input type="checkbox" class="ytf" value="tags" checked> Tags</label>
     {% if pack.localizations %}<label><input type="checkbox" class="ytf" value="localizations"> Localizations (25 languages)</label>{% endif %}
     {% if pack.srt_en %}<label><input type="checkbox" class="ytf" value="captions"> Captions — English (cleaned SRT)</label>{% endif %}
-    {% if pack.localizations and pack.transcript_segments %}<label><input type="checkbox" class="ytf" value="translated_captions"> Translated captions (25 languages · slower, ~1–2 min)</label>{% endif %}
+    {% if pack.localizations and pack.transcript_segments %}<label><input type="checkbox" class="ytf" value="translated_captions"> Translated captions (25 languages · runs in the background · uses a lot of daily YouTube API quota)</label>{% endif %}
     <div class="row">
       <button class="pub" id="ytPublishAll">Publish All checked →</button>
       <button class="pub ghost" id="ytDisconnect">Disconnect</button>
