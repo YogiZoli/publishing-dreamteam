@@ -35,6 +35,17 @@
  #ytResult .line{padding:3px 0}
  #ytResult .y{color:#2a9d3a}
  #ytResult .n{color:#a11}
+ button.pub:disabled,button.upload:disabled{opacity:.55;cursor:not-allowed}
+ button.pub.done,button.upload.done{background:#2a9d3a!important;opacity:1;cursor:default}
+ #ytModalWrap{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:60}
+ #ytModal{background:#fff;border-radius:16px;padding:30px 34px;max-width:420px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+ #ytModal .big{font-size:2.1rem;margin:0 0 6px}
+ #ytModal h3{margin:0 0 14px;font-size:1.15rem}
+ #ytModal .saved{font-size:1.6rem;font-weight:800;color:#c00;margin:8px 0}
+ #ytModal .sub{color:#666;font-size:.9rem;line-height:1.5}
+ #ytModal .daily{margin-top:14px;padding-top:12px;border-top:1px solid #eee;font-size:.9rem}
+ #ytModal button{margin-top:18px;background:#1d1d1f;color:#fff;border:0;border-radius:8px;padding:10px 26px;font-size:.9rem;cursor:pointer}
+ #ytConfetti{position:fixed;inset:0;pointer-events:none;z-index:70}
 </style>
 </head>
 <body>
@@ -141,6 +152,18 @@ CHAPTERS
 
 <p style="color:#999;font-size:.8rem">Video: https://youtu.be/{{ pack.video_id }}</p>
 
+{% if paid_tier and yt_write_path %}
+<canvas id="ytConfetti"></canvas>
+<div id="ytModalWrap"><div id="ytModal">
+  <p class="big">🎉</p>
+  <h3>Published to YouTube!</h3>
+  <div class="saved" id="ytSaved"></div>
+  <div class="sub" id="ytSub"></div>
+  <div class="daily" id="ytDaily"></div>
+  <button id="ytModalClose">Nice — close</button>
+</div></div>
+{% endif %}
+
 <script>
 function effLen(tags){let t=tags.reduce((a,x)=>a+x.length+(x.includes(' ')?2:0),0);return t+Math.max(tags.length-1,0);}
 const tagEl=document.getElementById('tags');
@@ -163,9 +186,14 @@ document.querySelectorAll('button.copy').forEach(btn=>{
 (function(){
  const AID={{ artifact_id | tojson }};
  const bar=document.getElementById('ytbar');
- // Per-field Upload buttons map a Copy button's data-t to a publish field.
  const FIELD_BY_COPY={title:'title',desc:'description',tags:'tags',srt:'captions'};
  const LABEL={title:'Title',description:'Description',tags:'Tags',localizations:'Localizations',captions:'Captions'};
+ // Rough minutes this field would take to do BY HAND (anchored to the ROI doc:
+ // a full 25-language pack by hand ≈ 3–5+ hrs, single-language paste ≈ minutes).
+ const SAVE_MIN={title:3,description:8,tags:5,localizations:180,captions:15};
+
+ function fmt(min){min=Math.round(min);if(min<60)return '~'+min+' min';
+  const h=Math.floor(min/60),m=min%60;return '~'+h+' hr'+(m?' '+m+' min':'');}
 
  async function post(fields){
   const r=await fetch('/yt/publish',{method:'POST',credentials:'same-origin',
@@ -183,8 +211,55 @@ document.querySelectorAll('button.copy').forEach(btn=>{
    box.appendChild(d);
   });
  }
- function markBtn(btn,ok,txt){const o=btn.textContent;btn.textContent=(ok?'✓ ':'✗ ')+txt;
-  btn.classList.add(ok?'ok':'err');setTimeout(()=>{btn.textContent=o;btn.classList.remove('ok','err');},2600);}
+
+ // ---- time confetti -------------------------------------------------
+ function confettiBurst(){
+  const c=document.getElementById('ytConfetti');const ctx=c.getContext('2d');
+  c.width=innerWidth;c.height=innerHeight;
+  const cols=['#c00','#ffd166','#2a9d3a','#4a8cff','#b197fc','#ff7ab6'];
+  const P=[];for(let i=0;i<140;i++)P.push({x:innerWidth/2,y:innerHeight/3,
+    vx:(Math.random()-.5)*14,vy:Math.random()*-12-4,g:.35+Math.random()*.2,
+    s:5+Math.random()*7,c:cols[i%cols.length],r:Math.random()*6,vr:(Math.random()-.5)*.4});
+  let f=0;(function anim(){f++;ctx.clearRect(0,0,c.width,c.height);
+   P.forEach(p=>{p.vy+=p.g;p.x+=p.vx;p.y+=p.vy;p.r+=p.vr;
+    ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.r);ctx.fillStyle=p.c;
+    ctx.fillRect(-p.s/2,-p.s/2,p.s,p.s*.6);ctx.restore();});
+   if(f<120)requestAnimationFrame(anim);else ctx.clearRect(0,0,c.width,c.height);})();
+ }
+ function celebrate(savedMin,elapsedS){
+  confettiBurst();
+  const key='dt_saved_'+new Date().toISOString().slice(0,10);
+  let daily=savedMin;try{daily=parseFloat(localStorage.getItem(key)||'0')+savedMin;localStorage.setItem(key,daily);}catch(e){}
+  document.getElementById('ytSaved').textContent='You just saved '+fmt(savedMin);
+  document.getElementById('ytSub').textContent='That is roughly how long this would have taken by hand. This publish took '+elapsedS.toFixed(1)+'s.';
+  document.getElementById('ytDaily').textContent='⏱️ Today with DreamTeam you have saved '+fmt(daily)+'.';
+  document.getElementById('ytModalWrap').style.display='flex';
+ }
+ const mc=document.getElementById('ytModalClose');
+ if(mc)mc.addEventListener('click',()=>{document.getElementById('ytModalWrap').style.display='none';});
+
+ // ---- shared publish runner (Publish All + per-field) ---------------
+ async function run(btn,fields){
+  if(btn.disabled)return;                       // guard against double-press
+  btn.disabled=true;const base=btn.dataset.base||btn.textContent;btn.dataset.base=base;
+  const t0=Date.now();
+  const tick=setInterval(()=>{btn.textContent='Publishing… '+((Date.now()-t0)/1000|0)+'s';},250);
+  try{
+   const res=await post(fields);
+   clearInterval(tick);
+   const elapsed=(Date.now()-t0)/1000;
+   renderResults(res);
+   const okFields=Object.keys(res).filter(k=>res[k].ok);
+   if(okFields.length){
+    btn.textContent='✓ Published ('+elapsed.toFixed(1)+'s)';btn.classList.add('done'); // stays disabled + green
+    celebrate(okFields.reduce((a,f)=>a+(SAVE_MIN[f]||0),0),elapsed);
+   }else{
+    btn.textContent='✗ Failed — retry';btn.disabled=false;            // let them try again
+   }
+  }catch(e){
+   clearInterval(tick);btn.textContent=base;btn.disabled=false;alert(e.message);
+  }
+ }
 
  function addUploadButtons(){
   document.querySelectorAll('button.copy').forEach(cp=>{
@@ -192,13 +267,10 @@ document.querySelectorAll('button.copy').forEach(btn=>{
    if(cp.parentNode.querySelector('.upload'))return;
    const b=document.createElement('button');b.className='upload';b.textContent='Upload';
    b.title='Write just this field to your video';
-   b.addEventListener('click',async()=>{
+   b.addEventListener('click',()=>{
+    if(b.disabled)return;
     if(!confirm('Publish '+LABEL[field]+' to your YouTube video now?'))return;
-    b.disabled=true;const o=b.textContent;b.textContent='Uploading…';
-    try{const res=await post([field]);const ok=(res[field]||{}).ok;
-      b.textContent=o;markBtn(b,ok,ok?'Uploaded':'Failed');renderResults(res);}
-    catch(e){b.textContent=o;markBtn(b,false,'Error');alert(e.message);}
-    finally{b.disabled=false;}
+    run(b,[field]);
    });
    cp.parentNode.appendChild(b);
   });
@@ -226,15 +298,12 @@ document.querySelectorAll('button.copy').forEach(btn=>{
   if(!confirm('Disconnect your YouTube channel from this app?'))return;
   await fetch('/yt/disconnect',{method:'POST',credentials:'same-origin'});location.reload();});
  const pa=document.getElementById('ytPublishAll');
- if(pa)pa.addEventListener('click',async()=>{
+ if(pa)pa.addEventListener('click',()=>{
+  if(pa.disabled)return;
   const fields=[...document.querySelectorAll('.ytf:checked')].map(c=>c.value);
   if(!fields.length){alert('Tick at least one field to publish.');return;}
   if(!confirm('Publish to your YouTube video now?\n\n'+fields.map(f=>'• '+LABEL[f]).join('\n')))return;
-  pa.disabled=true;const o=pa.textContent;pa.textContent='Publishing…';
-  try{const res=await post(fields);renderResults(res);
-    const allok=Object.values(res).every(v=>v.ok);markBtn(pa,allok,allok?'Published':'See results');}
-  catch(e){markBtn(pa,false,'Error');alert(e.message);}
-  finally{pa.disabled=false;pa.textContent=o;}
+  run(pa,fields);
  });
  refresh();
 })();
