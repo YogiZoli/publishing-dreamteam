@@ -23,11 +23,48 @@
  .info{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#c7c7cc;color:#fff;font-size:.72rem;font-weight:700;font-style:italic;font-family:Georgia,serif;cursor:help;position:relative;margin-left:7px;flex:none}
  .info:hover::after{content:attr(data-tip);position:absolute;left:0;top:24px;width:250px;background:#1d1d1f;color:#fff;padding:9px 11px;border-radius:7px;font-size:.72rem;font-weight:400;font-style:normal;line-height:1.4;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;text-align:left;z-index:20;box-shadow:0 6px 18px rgba(0,0,0,.22)}
  .info:hover::before{content:'';position:absolute;left:6px;top:18px;border:6px solid transparent;border-bottom-color:#1d1d1f;z-index:20}
+ .ytbar{position:sticky;top:0;z-index:15}
+ .ytbar label{display:block;margin:5px 0;font-size:.9rem;cursor:pointer}
+ .ytbar .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+ button.pub{background:#c00;color:#fff;border:0;border-radius:6px;padding:8px 18px;font-size:.85rem;font-weight:700;cursor:pointer}
+ button.pub.ghost{background:#e5e5e5;color:#1d1d1f;font-weight:400}
+ button.upload{background:#c00;color:#fff;border:0;border-radius:6px;padding:6px 12px;font-size:.78rem;cursor:pointer;white-space:nowrap;margin-left:6px}
+ button.upload.ok{background:#2a9d3a}
+ button.upload.err{background:#a11}
+ #ytResult{margin-top:12px;font-size:.85rem}
+ #ytResult .line{padding:3px 0}
+ #ytResult .y{color:#2a9d3a}
+ #ytResult .n{color:#a11}
 </style>
 </head>
 <body>
 <h1>Publishing Pack</h1>
 <p><a href="/app">← New pack</a></p>
+
+{% if paid_tier and yt_write_path %}
+<div class="card purple ytbar" id="ytbar" style="display:none">
+  <h2><span class="lbl">🚀 Publish to YouTube <span class="info" data-tip="Write this pack straight onto your OWN video. Nothing is uploaded until you tick what to publish and confirm — this is Approval Mode.">i</span></span></h2>
+
+  <div id="ytNotConnected" style="display:none">
+    <p>Connect your YouTube channel to publish this pack directly. You review everything first — nothing is written without your confirmation, and only ever to your own video.</p>
+    <button class="pub" id="ytConnectBtn">Connect YouTube channel</button>
+  </div>
+
+  <div id="ytConnected" style="display:none">
+    <p>Connected as <strong id="ytChannel"></strong>. Tick what to publish to <em>your own</em> video, then confirm.</p>
+    <label><input type="checkbox" class="ytf" value="title" checked> Title</label>
+    <label><input type="checkbox" class="ytf" value="description" checked> Description (chapters + hashtags included)</label>
+    <label><input type="checkbox" class="ytf" value="tags" checked> Tags</label>
+    {% if pack.localizations %}<label><input type="checkbox" class="ytf" value="localizations"> Localizations (25 languages)</label>{% endif %}
+    {% if pack.srt_en %}<label><input type="checkbox" class="ytf" value="captions"> Captions (cleaned SRT)</label>{% endif %}
+    <div class="row">
+      <button class="pub" id="ytPublishAll">Publish All checked →</button>
+      <button class="pub ghost" id="ytDisconnect">Disconnect</button>
+    </div>
+    <div id="ytResult"></div>
+  </div>
+</div>
+{% endif %}
 
 <div class="card"><h2><span class="lbl">1 · Title <span class="info" data-tip="Your optimized video title. Paste into YouTube Studio → Content → your video → Details → Title.">i</span></span> <button class="copy" data-t="title">Copy</button></h2>
 <pre id="title">{{ pack.title }}</pre></div>
@@ -121,6 +158,87 @@ document.querySelectorAll('button.copy').forEach(btn=>{
   setTimeout(()=>{btn.textContent=old;btn.classList.remove('ok');},1500);
  });
 });
+{% if paid_tier and yt_write_path %}
+// ---- YouTube publish (Approval Mode) ----------------------------------
+(function(){
+ const AID={{ artifact_id | tojson }};
+ const bar=document.getElementById('ytbar');
+ // Per-field Upload buttons map a Copy button's data-t to a publish field.
+ const FIELD_BY_COPY={title:'title',desc:'description',tags:'tags',srt:'captions'};
+ const LABEL={title:'Title',description:'Description',tags:'Tags',localizations:'Localizations',captions:'Captions'};
+
+ async function post(fields){
+  const r=await fetch('/yt/publish',{method:'POST',credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({artifact_id:AID,fields:fields})});
+  if(!r.ok){let m='Publish failed';try{m=(await r.json()).detail||m;}catch(e){}throw new Error(m+' ('+r.status+')');}
+  return (await r.json()).results||{};
+ }
+ function renderResults(res){
+  const box=document.getElementById('ytResult');box.innerHTML='';
+  Object.keys(res).forEach(k=>{
+   const ok=res[k].ok;const d=document.createElement('div');
+   d.className='line '+(ok?'y':'n');
+   d.textContent=(ok?'✓ ':'✗ ')+(LABEL[k]||k)+' — '+res[k].message;
+   box.appendChild(d);
+  });
+ }
+ function markBtn(btn,ok,txt){const o=btn.textContent;btn.textContent=(ok?'✓ ':'✗ ')+txt;
+  btn.classList.add(ok?'ok':'err');setTimeout(()=>{btn.textContent=o;btn.classList.remove('ok','err');},2600);}
+
+ function addUploadButtons(){
+  document.querySelectorAll('button.copy').forEach(cp=>{
+   const field=FIELD_BY_COPY[cp.dataset.t];if(!field)return;
+   if(cp.parentNode.querySelector('.upload'))return;
+   const b=document.createElement('button');b.className='upload';b.textContent='Upload';
+   b.title='Write just this field to your video';
+   b.addEventListener('click',async()=>{
+    if(!confirm('Publish '+LABEL[field]+' to your YouTube video now?'))return;
+    b.disabled=true;const o=b.textContent;b.textContent='Uploading…';
+    try{const res=await post([field]);const ok=(res[field]||{}).ok;
+      b.textContent=o;markBtn(b,ok,ok?'Uploaded':'Failed');renderResults(res);}
+    catch(e){b.textContent=o;markBtn(b,false,'Error');alert(e.message);}
+    finally{b.disabled=false;}
+   });
+   cp.parentNode.appendChild(b);
+  });
+ }
+
+ async function refresh(){
+  try{
+   const r=await fetch('/yt/status',{credentials:'same-origin'});
+   if(!r.ok)return;const d=await r.json();
+   if(!d.available)return;                 // free tier / flag off → stay hidden
+   bar.style.display='';
+   document.getElementById('ytNotConnected').style.display=d.connected?'none':'';
+   document.getElementById('ytConnected').style.display=d.connected?'':'none';
+   if(d.connected){
+    document.getElementById('ytChannel').textContent=d.channel_title||'your channel';
+    addUploadButtons();
+   }
+  }catch(e){}
+ }
+
+ const cb=document.getElementById('ytConnectBtn');
+ if(cb)cb.addEventListener('click',()=>{location.href='/yt/connect?return_to='+encodeURIComponent(location.pathname);});
+ const dc=document.getElementById('ytDisconnect');
+ if(dc)dc.addEventListener('click',async()=>{
+  if(!confirm('Disconnect your YouTube channel from this app?'))return;
+  await fetch('/yt/disconnect',{method:'POST',credentials:'same-origin'});location.reload();});
+ const pa=document.getElementById('ytPublishAll');
+ if(pa)pa.addEventListener('click',async()=>{
+  const fields=[...document.querySelectorAll('.ytf:checked')].map(c=>c.value);
+  if(!fields.length){alert('Tick at least one field to publish.');return;}
+  if(!confirm('Publish to your YouTube video now?\n\n'+fields.map(f=>'• '+LABEL[f]).join('\n')))return;
+  pa.disabled=true;const o=pa.textContent;pa.textContent='Publishing…';
+  try{const res=await post(fields);renderResults(res);
+    const allok=Object.values(res).every(v=>v.ok);markBtn(pa,allok,allok?'Published':'See results');}
+  catch(e){markBtn(pa,false,'Error');alert(e.message);}
+  finally{pa.disabled=false;pa.textContent=o;}
+ });
+ refresh();
+})();
+{% endif %}
 {% if pack.chapters_estimated and transcript_proxy %}
 // Async backfill is running server-side. Poll until chapters are upgraded to
 // real timing, then reload once so the description + chapters cards refresh.

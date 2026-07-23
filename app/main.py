@@ -16,6 +16,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.admin import router as admin_router
 from app.auth import router as auth_router
+from app.ytwrite import router as ytwrite_router
 from app.config import FEATURE_FLAGS, flag, get_settings
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -69,6 +70,7 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 app.include_router(auth_router)
 app.include_router(admin_router)
+app.include_router(ytwrite_router)
 
 
 @app.get("/health")
@@ -289,6 +291,7 @@ async def view_artifact(request: Request, artifact_id: str):
             "pack": pack,
             "paid_tier": flag("paid_tier"),
             "transcript_proxy": flag("transcript_proxy"),
+            "yt_write_path": flag("yt_write_path"),
             "artifact_id": artifact_id,
         },
     )
