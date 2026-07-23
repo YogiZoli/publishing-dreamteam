@@ -288,17 +288,28 @@ Lines:
 {lines}"""
 
 
-async def generate_translated_captions(texts: list[str], lang_name: str) -> list[str]:
+# Caption TRANSLATION runs on a stronger "thinking" model by default, not the
+# fast lite pack model: holding an EXACT 1:1 line count across a translation is
+# the same rigid-count task that the lite model slipped on for cleaned SRT, and
+# it slips more often per-language on translation. gemini-3.6-flash holds it far
+# better. Env-overridable; never a *-latest alias (see the fallback-chain note).
+TRANSLATE_CAPTIONS_MODEL = os.getenv("TRANSLATE_CAPTIONS_MODEL", "gemini-3.6-flash")
+
+
+async def generate_translated_captions(
+    texts: list[str], lang_name: str, model: str | None = None
+) -> list[str]:
     """Translate caption texts into one language, preserving order and count.
 
     Timing is the caller's job — this only rewrites text, 1:1 with the input, so
-    the existing start/dur are reused verbatim for the translated SRT. Same
-    two-model reliability pattern as generate_cleaned_captions: a count mismatch
-    (call succeeded, shape wrong) retries once against CLEAN_SRT_RETRY_MODEL
-    before raising, so the caller can skip that one language rather than upload a
-    misaligned track."""
+    the existing start/dur are reused verbatim for the translated SRT. Runs on
+    the stronger TRANSLATE_CAPTIONS_MODEL and re-rolls it TWICE on a count
+    mismatch (the call succeeded, the shape is just wrong — a fresh roll usually
+    lands), then raises so the caller can skip that one language rather than
+    upload a misaligned track."""
     if not texts:
         return []
+    model = model or TRANSLATE_CAPTIONS_MODEL
     payload = json.dumps(texts, ensure_ascii=False)
     prompt = TRANSLATE_SRT_PROMPT.format(lang=lang_name, n=len(texts), lines=payload)
 
@@ -308,14 +319,11 @@ async def generate_translated_captions(texts: list[str], lang_name: str) -> list
             return [str(x) for x in lines]
         return None
 
-    data, _u = await generate_json_with_usage(prompt)
-    lines = _extract(data)
-    if lines is not None:
-        return lines
-    data2, _u2 = await generate_json_with_usage(prompt, model=CLEAN_SRT_RETRY_MODEL)
-    lines = _extract(data2)
-    if lines is not None:
-        return lines
+    for _attempt in range(2):
+        data, _u = await generate_json_with_usage(prompt, model=model)
+        lines = _extract(data)
+        if lines is not None:
+            return lines
     raise LLMError(f"translated caption count mismatch for {lang_name}")
 
 

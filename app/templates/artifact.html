@@ -201,9 +201,17 @@ document.querySelectorAll('button.copy').forEach(btn=>{
   const h=Math.floor(min/60),m=min%60;return '~'+h+' hr'+(m?' '+m+' min':'');}
  function estimateSec(fields){
   let meta=0,s=0;
-  fields.forEach(f=>{ if(['title','description','tags','localizations'].includes(f)) meta=Math.max(meta,EST_SEC[f]); else s+=(EST_SEC[f]||1); });
+  fields.forEach(f=>{ if(['title','description','tags','localizations'].includes(f)||f.indexOf('loc:')===0) meta=Math.max(meta,EST_SEC[f]||2); else s+=(EST_SEC[f]||1); });
   return Math.max(meta+s,2);
  }
+ // Field name from a Copy button's data-t (incl. per-language "loc<code>").
+ function fieldFromCopy(t){
+  if(FIELD_BY_COPY[t])return FIELD_BY_COPY[t];
+  if(t&&t.slice(0,3)==='loc'&&t.length>3)return 'loc:'+t.slice(3);
+  return null;
+ }
+ function labelFor(f){ return (f&&f.indexOf('loc:')===0) ? ('Localization ('+f.slice(4)+')') : (LABEL[f]||f); }
+ function savedFor(f){ return (f&&f.indexOf('loc:')===0) ? 1 : (SAVE_MIN[f]||0); }
 
  async function post(fields){
   const r=await fetch('/yt/publish',{method:'POST',credentials:'same-origin',
@@ -217,7 +225,7 @@ document.querySelectorAll('button.copy').forEach(btn=>{
   Object.keys(res).forEach(k=>{
    const ok=res[k].ok;const d=document.createElement('div');
    d.className='line '+(ok?'y':'n');
-   d.textContent=(ok?'✓ ':'✗ ')+(LABEL[k]||k)+' — '+res[k].message;
+   d.textContent=(ok?'✓ ':'✗ ')+labelFor(k)+' — '+res[k].message;
    box.appendChild(d);
   });
  }
@@ -287,7 +295,7 @@ document.querySelectorAll('button.copy').forEach(btn=>{
    if(okFields.length){
     btn.textContent='✓ Published ('+elapsed.toFixed(1)+'s)';btn.classList.add('done');btn.disabled=true;
     okFields.forEach(f=>greenField(f,btn));   // green the matching per-field Upload buttons
-    celebrate(okFields.reduce((a,f)=>a+(SAVE_MIN[f]||0),0),elapsed);
+    celebrate(okFields.reduce((a,f)=>a+savedFor(f),0),elapsed);
    }else{
     btn.textContent='✗ Failed — retry';btn.disabled=false;            // let them try again
    }
@@ -300,13 +308,13 @@ document.querySelectorAll('button.copy').forEach(btn=>{
 
  function addUploadButtons(){
   document.querySelectorAll('button.copy').forEach(cp=>{
-   const field=FIELD_BY_COPY[cp.dataset.t];if(!field)return;
+   const field=fieldFromCopy(cp.dataset.t);if(!field)return;
    if(cp.parentNode.querySelector('.upload'))return;
    const b=document.createElement('button');b.className='upload';b.textContent='Upload';b.dataset.field=field;
    b.title='Write just this field to your video';
    b.addEventListener('click',()=>{
     if(b.disabled)return;
-    if(!confirm('Publish '+LABEL[field]+' to your YouTube video now?'))return;
+    if(!confirm('Publish '+labelFor(field)+' to your YouTube video now?'))return;
     run(b,[field]);
    });
    cp.parentNode.appendChild(b);
@@ -339,7 +347,7 @@ document.querySelectorAll('button.copy').forEach(btn=>{
   if(pa.disabled)return;
   const fields=[...document.querySelectorAll('.ytf:checked')].map(c=>c.value);
   if(!fields.length){alert('Tick at least one field to publish.');return;}
-  if(!confirm('Publish to your YouTube video now?\n\n'+fields.map(f=>'• '+LABEL[f]).join('\n')))return;
+  if(!confirm('Publish to your YouTube video now?\n\n'+fields.map(f=>'• '+labelFor(f)).join('\n')))return;
   run(pa,fields);
  });
  refresh();

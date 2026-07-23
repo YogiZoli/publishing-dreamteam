@@ -356,13 +356,19 @@ async def _publish_fields(user_id: str, pack: dict, fields: list[str]) -> dict:
             raise HTTPException(403, "That video does not belong to the connected channel")
 
         meta_fields = [f for f in fields if f in ("title", "description", "tags")]
-        wants_loc = "localizations" in fields
+        wants_loc_all = "localizations" in fields
+        # Per-language localization uploads: field "loc:<code>" (from the
+        # individual Upload buttons in the 25-language section).
+        loc_codes = [f.split(":", 1)[1] for f in fields if f.startswith("loc:")]
         wants_caps = "captions" in fields
+        packloc = pack.get("localizations") or {}
 
-        if meta_fields or wants_loc:
+        if meta_fields or wants_loc_all or loc_codes:
             # videos.update replaces the snippet, so start from the existing one
             # (categoryId is required and must survive) and overlay only what
-            # the user chose to publish.
+            # the user chose to publish. Everything folds into ONE PUT so a
+            # per-language localization write can never revert a title/desc that
+            # was written in the same call.
             if "title" in meta_fields:
                 snippet["title"] = pack.get("title", snippet.get("title", ""))[:100]
             if "description" in meta_fields:
@@ -371,12 +377,25 @@ async def _publish_fields(user_id: str, pack: dict, fields: list[str]) -> dict:
                 snippet["tags"] = pack.get("tags", []) or []
             body: dict = {"id": video_id, "snippet": snippet}
             parts = "snippet"
-            if wants_loc:
-                loc = _localizations_payload(pack)
+
+            # Build the localizations to write: all 25 if requested, plus any
+            # individually-requested language, MERGED onto the video's existing
+            # localizations so other languages are preserved.
+            loc_to_write: dict = {}
+            if wants_loc_all:
+                loc_to_write.update(_localizations_payload(pack))
+            for c in loc_codes:
+                loc = packloc.get(c)
                 if loc:
-                    snippet.setdefault("defaultLanguage", "en")
-                    body["localizations"] = loc
-                    parts = "snippet,localizations"
+                    loc_to_write[c] = {
+                        "title": (loc.get("title") or "").strip(),
+                        "description": (loc.get("description") or "").strip(),
+                    }
+            if loc_to_write:
+                snippet.setdefault("defaultLanguage", "en")
+                body["localizations"] = {**dict(existing.get("localizations") or {}), **loc_to_write}
+                parts = "snippet,localizations"
+
             r = await client.put(
                 f"{YT_API}/videos",
                 params={"part": parts},
@@ -387,8 +406,13 @@ async def _publish_fields(user_id: str, pack: dict, fields: list[str]) -> dict:
             msg = "Updated" if ok else f"Failed ({r.status_code}): {r.text[:160]}"
             for f in meta_fields:
                 results[f] = {"ok": ok, "message": msg}
-            if wants_loc:
+            if wants_loc_all:
                 results["localizations"] = {"ok": ok, "message": msg}
+            for c in loc_codes:
+                results["loc:" + c] = {
+                    "ok": ok and c in packloc,
+                    "message": msg if c in packloc else "no localization for this language",
+                }
             if not ok:
                 log.warning("videos.update failed %s: %s", r.status_code, r.text[:200])
 
@@ -476,25 +500,35 @@ async def _insert_translated_captions(
     codes = list((pack.get("localizations") or {}).keys()) or list(LANG_NAMES.keys())
     texts = [s["text"] for s in segments]
     ok = 0
+    # Up to 2 rounds over the still-pending languages: generate_translated_
+    # captions already re-rolls the strong model twice internally, so a language
+    # that slips the exact line-count on the first round gets more chances here
+    # before we give up. Only the languages that FAILED are retried.
+    pending = list(codes)
     fails: list[str] = []
-    for code in codes:
-        name = LANG_NAMES.get(code, code)
-        try:
-            translated = await llm.generate_translated_captions(texts, name)
-            tsegs = [{**s, "text": (t or "").strip()} for s, t in zip(segments, translated)]
-            tsegs = [s for s in tsegs if s["text"]]
-            if not tsegs:
+    for _round in range(2):
+        fails = []
+        for code in pending:
+            name = LANG_NAMES.get(code, code)
+            try:
+                translated = await llm.generate_translated_captions(texts, name)
+                tsegs = [{**s, "text": (t or "").strip()} for s, t in zip(segments, translated)]
+                tsegs = [s for s in tsegs if s["text"]]
+                if not tsegs:
+                    fails.append(code)
+                    continue
+                srt = yt.transcript_to_srt(tsegs)
+                res = await _upload_caption(client, access_token, video_id, srt, code, f"{name} (auto)")
+                if res["ok"] or "already exists" in res.get("message", ""):
+                    ok += 1
+                else:
+                    fails.append(code)
+            except Exception as e:  # noqa: BLE001 — one language must never break the rest
+                log.warning("translated caption failed lang=%s: %s", code, str(e)[:160])
                 fails.append(code)
-                continue
-            srt = yt.transcript_to_srt(tsegs)
-            res = await _upload_caption(client, access_token, video_id, srt, code, f"{name} (auto)")
-            if res["ok"]:
-                ok += 1
-            else:
-                fails.append(code)
-        except Exception as e:  # noqa: BLE001 — one language must never break the rest
-            log.warning("translated caption failed lang=%s: %s", code, str(e)[:160])
-            fails.append(code)
+        if not fails:
+            break
+        pending = fails  # retry only the ones that did not land
     msg = f"{ok}/{len(codes)} language tracks uploaded"
     if fails:
         msg += f" (skipped: {', '.join(fails)})"
@@ -519,7 +553,12 @@ async def publish(request: Request):
     except Exception:  # noqa: BLE001
         raise HTTPException(400, "Invalid request body")
     artifact_id = payload.get("artifact_id")
-    fields = [f for f in (payload.get("fields") or []) if f in ALLOWED_FIELDS]
+    # Accept the fixed field names plus per-language "loc:<code>" (individual
+    # localization uploads from the 25-language section).
+    fields = [
+        f for f in (payload.get("fields") or [])
+        if f in ALLOWED_FIELDS or (f.startswith("loc:") and f[4:] in LANG_NAMES)
+    ]
     if not artifact_id or not fields:
         raise HTTPException(400, "artifact_id and at least one valid field are required")
 
